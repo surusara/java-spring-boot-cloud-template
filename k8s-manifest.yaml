@@ -1,0 +1,472 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-stream-config
+  namespace: financial-streams
+data:
+  # JVM memory and GC tuning. Referenced by Deployment env as JAVA_TOOL_OPTIONS.
+  # JAVA_TOOL_OPTIONS is auto-picked by any JVM — no Dockerfile ENTRYPOINT change needed.
+  JAVA_TOOL_OPTIONS: "-Xmx1G -Xms1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+  application.yml: |
+    server:
+      port: 8080
+      servlet:
+        context-path: /api/fs
+
+    spring:
+      application:
+        name: kafka-streams-cb
+      kafka:
+        bootstrap-servers: kafka-broker-0.kafka-broker:9092,kafka-broker-1.kafka-broker:9092,kafka-broker-2.kafka-broker:9092
+        producer:
+          acks: all
+          # [Default] Broker deduplicates retried sends via producer ID + sequence number. Default since Kafka 3.0.
+          enable-idempotence: true
+          # [Default] Max unacknowledged requests. 5 is the max with idempotence.
+          max-in-flight-requests-per-connection: 5
+          # [Default] Effectively infinite retries. Bounded by delivery-timeout-ms instead. Default since Kafka 3.0.
+          retries: 2147483647
+          linger-ms: 5
+          batch-size: 65536
+          buffer-memory: 67108864
+          # [Default] 2 min total delivery window including retries.
+          delivery-timeout-ms: 120000
+          # [Default] 30 sec per broker request.
+          request-timeout-ms: 30000
+          # [Default] 60 sec max blocking when buffer full or metadata unavailable.
+          max-block-ms: 60000
+          # lz4: fastest compression. Low CPU overhead, good for high-throughput financial events.
+          # Options: none, gzip (best ratio), snappy (balanced), lz4 (fastest), zstd (best overall).
+          compression-type: lz4
+          # --- Transactional Producer (Exactly-Once Delivery) ---
+          # ${random.uuid} guarantees globally unique ID per JVM start — no cross-pod collision.
+          # With Deployments, UUID is the correct choice — fencing won't work regardless of ID scheme.
+          # Orphaned IDs auto-cleaned after transactional.id.expiration.ms (default 7 days).
+          transactional-id-prefix: payments-producer-${random.uuid}-
+          # How long broker waits before force-aborting a pending transaction.
+          # Must be <= broker's transaction.max.timeout.ms (default 900s).
+          transaction-timeout-ms: 60000
+    management:
+      # --- Separate Management Port ---
+      # Actuator on port 9090 (isolated from business APIs on 8080).
+      # Kubelet probes + Prometheus hit this port — no mTLS/SPIFFE needed.
+      server:
+        port: 9090
+      endpoints:
+        web:
+          exposure:
+            include: health,info,metrics,prometheus
+      endpoint:
+        health:
+          probes:
+            enabled: true
+          show-details: always
+          show-components: always
+      health:
+        livenessState:
+          enabled: true
+        readinessState:
+          enabled: true
+        kafka:
+          enabled: true
+    app:
+      input:
+        topic: payments.input
+      output:
+        topic: payments.output
+      stream:
+        application-id: payments-stream-v1
+        processing-guarantee: exactly_once_v2
+        # [Default] Single stream thread. Increase for higher parallelism per pod.
+        num-stream-threads: 1
+        commit-interval-ms: 1000
+        # [Default] State dir for task metadata. Kafka Streams creates subdirs per application.id.
+        # emptyDir mounted here because readOnlyRootFilesystem: true blocks writes to /tmp.
+        state-dir: /tmp/kafka-streams
+        replication-factor: 3
+        # [Default] No standby replicas — stateless topology, no state stores to replicate.
+        num-standby-replicas: 0
+        # [Default] No joins in topology — idle partitions won't block processing.
+        max-task-idle-ms: 1000
+        consumer:
+          auto-offset-reset: latest
+          max-poll-records: 250
+          # 12 min: must be >= session-timeout-ms. Covers max circuit breaker delay (10m) + 2m buffer.
+          max-poll-interval-ms: 720000
+          # 12 min: covers max circuit breaker restart delay (10m) + 2m buffer.
+          # Partitions stay reserved on this pod during breaker OPEN. Dead pods caught by K8s liveness probe.
+          session-timeout-ms: 720000
+          # 10 sec heartbeat. Must be < session-timeout-ms / 3 (720000/3 = 240s).
+          heartbeat-interval-ms: 10000
+          # [Default] 30 sec per broker request.
+          request-timeout-ms: 30000
+          # [Default] Backoff between retries for failed fetch/offset-commit requests.
+          retry-backoff-ms: 500
+          # [Default] 50MB max data per fetch request across all partitions.
+          fetch-max-bytes: 52428800
+          max-partition-fetch-bytes: 1048576
+          # [Default] Confluent Cloud: client.dns.lookup=use_all_dns_ips is default since Kafka 2.6.
+          # Resolves all IPs for a hostname and tries each for failover. No need to set explicitly.
+          # client-dns-lookup: use_all_dns_ips
+        # Static membership: set via HOSTNAME env var in Deployment.
+        # Prevents rebalance storms during KEDA scaling.
+        group-instance-id: ${HOSTNAME}
+        # Don't send LeaveGroup on graceful close. Coordinator waits session-timeout-ms.
+        internal-leave-group-on-close: false
+        producer:
+          acks: all
+          linger-ms: 5
+          batch-size: 65536
+          buffer-memory: 67108864
+          # [Default] Confluent Cloud: client.dns.lookup=use_all_dns_ips is default since Kafka 2.6.
+          # client-dns-lookup: use_all_dns_ips
+      circuit-breaker:
+        failure-rate-threshold: 20
+        time-window-seconds: 1800
+        minimum-number-of-calls: 100
+        permitted-calls-in-half-open-state: 20
+        max-wait-in-half-open-state: 2m
+        restart-delays:
+          - 1m
+          - 10m
+          - 20m
+        scheduler-delay-ms: 5000
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-stream
+  namespace: financial-streams
+  labels:
+    app: payments-stream
+    component: kafka-streams
+spec:
+  replicas: 2                      # KEDA will override this based on Kafka lag
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2                    # Add 2 new pods before removing old ones
+      maxUnavailable: 0              # Never kill a pod until replacement is ready
+  selector:
+    matchLabels:
+      app: payments-stream
+  template:
+    metadata:
+      labels:
+        app: payments-stream
+        component: kafka-streams
+      annotations:
+        # Exclude management port from Istio sidecar interception.
+        # Without this, Envoy captures 9090 traffic and requires mTLS,
+        # but kubelet sends plain HTTP → probe fails → pod restarts in a loop.
+        traffic.istio.io/excludeInboundPorts: "9090"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - payments-stream
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: payments-stream
+      terminationGracePeriodSeconds: 120   # Give Kafka Streams 2 min for clean shutdown
+      containers:
+        - name: payments-stream
+          image: your-registry/payments-stream:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Management port: actuator, health probes, prometheus.
+            # Isolated from business APIs — no mTLS/SPIFFE required.
+            - name: management
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"             # Set to "preprod" or "prod" to disable Swagger UI
+            - name: JAVA_TOOL_OPTIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: payments-stream-config
+                  key: JAVA_TOOL_OPTIONS
+            # Static membership: pod name becomes group.instance.id.
+            # Kafka Streams recognizes returning pods and skips rebalance.
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # --- Downward API for /actuator/runtime discovery endpoint ---
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 1.5Gi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management          # Port 9090 — no mTLS, no context-path
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management          # Port 9090 — includes Kafka + circuit breaker checks
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management          # Port 9090 — gives app time to start before liveness kicks in
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20        # 10s + (20 * 5s) = 110s max startup time
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 90"]   # Wait 90 sec before SIGTERM for graceful drain
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            # emptyDir for Kafka Streams task metadata (required with readOnlyRootFilesystem: true).
+            # No PVC needed — stateless topology, only task metadata.
+            - name: state-store
+              mountPath: /tmp/kafka-streams
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: config
+          configMap:
+            name: payments-stream-config
+        - name: state-store
+          emptyDir: {}    # Task metadata only — stateless topology, no PVC needed
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-stream
+  namespace: financial-streams
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-stream-pdb
+  namespace: financial-streams
+spec:
+  minAvailable: 2                    # At least 2 pods always running during disruptions
+  selector:
+    matchLabels:
+      app: payments-stream
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-stream
+  namespace: financial-streams
+  labels:
+    app: payments-stream
+spec:
+  type: ClusterIP
+  ports:
+    # Business API port — behind mTLS/SPIFFE for S2S communication
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    # Management port — health probes + Prometheus scraping (no mTLS)
+    - name: management
+      port: 9090
+      targetPort: management
+      protocol: TCP
+  selector:
+    app: payments-stream
+
+---
+# ============================================================
+# KEDA ScaledObject — replaces HPA for Kafka lag-based scaling
+# ============================================================
+# KEDA auto-discovers partition count per topic and scales
+# replicas = count(partitions with lag). No hardcoded max needed.
+# Cooperative rebalancing + static membership ensures near-zero
+# processing disruption during scale events.
+# ============================================================
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payments-stream-scaler
+  namespace: financial-streams
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payments-stream
+  # Minimum pods — never go below 2 for high availability
+  minReplicaCount: 2
+  # Safety cap — KEDA auto-caps at partition count (48), but explicit max is safer
+  maxReplicaCount: 48
+  # Wait 5 min after last trigger activation before allowing scale-to-min
+  cooldownPeriod: 300
+  # Check Kafka lag every 15 seconds
+  pollingInterval: 15
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        # --- Scale-Up: fast but controlled ---
+        scaleUp:
+          # Wait 1 min to batch rapid signals before acting
+          stabilizationWindowSeconds: 60
+          policies:
+            # Add 2 pods per step (gentle scale-up, fewer rebalances)
+            - type: Pods
+              value: 2
+              # Evaluate every 1 minute
+              periodSeconds: 60
+        # --- Scale-Down: slow and cautious ---
+        scaleDown:
+          # Wait 5 min of sustained zero-lag before starting scale-down
+          stabilizationWindowSeconds: 300
+          policies:
+            # Remove 4 pods at a time (48 -> 2 in ~1 hour)
+            - type: Pods
+              value: 4
+              # Evaluate every 5 minutes
+              periodSeconds: 300
+          # If multiple policies, pick the one that removes fewest pods
+          selectPolicy: Min
+
+  triggers:
+    # --- Trigger 1: Trade topic (48 partitions) ---
+    - type: kafka
+      metadata:
+        # Kafka broker connection string
+        bootstrapServers: kafka-broker-0.kafka-broker:9092,kafka-broker-1.kafka-broker:9092,kafka-broker-2.kafka-broker:9092
+        # Consumer group to monitor lag for
+        consumerGroup: payments-stream-v1
+        # Trade topic name (48 partitions)
+        topic: payments.input
+        # Per-partition lag threshold before contributing to scale-up
+        lagThreshold: "500"
+        # Don't scale from 0->1 until at least 10 messages lag
+        activationLagThreshold: "10"
+        # KEY: desired replicas = count of lagging partitions.
+        # Physically caps at partition count (48). No hardcoded max needed.
+        limitToPartitionsWithLag: "true"
+        # Use latest offset if no committed offset found
+        offsetResetPolicy: "latest"
+        # Don't count idle consumers as active
+        allowIdleConsumers: "false"
+        # Include persistent lag in calculations
+        excludePersistentLag: "false"
+
+    # --- Trigger 2: Exception topic (6 partitions) ---
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka-broker-0.kafka-broker:9092,kafka-broker-1.kafka-broker:9092,kafka-broker-2.kafka-broker:9092
+        # Different consumer group for exception processing
+        consumerGroup: payments-exception-v1
+        # Exception topic name (6 partitions)
+        topic: payments.exception
+        # Same lag threshold
+        lagThreshold: "500"
+        activationLagThreshold: "10"
+        # Caps at 6 replicas max for this topic alone
+        limitToPartitionsWithLag: "true"
+        offsetResetPolicy: "latest"
+        allowIdleConsumers: "false"
+        excludePersistentLag: "false"
+
+    # --- Trigger 3: Cron-based floor during market hours ---
+    - type: cron
+      metadata:
+        # EMEA timezone (Swiss market hours)
+        timezone: Europe/Zurich
+        # Mon-Fri 8:00 AM CET/CEST — market open
+        start: "0 8 * * 1-5"
+        # Mon-Fri 16:30 PM CET/CEST — market close
+        end: "30 16 * * 1-5"
+        # Keep at least 4 pods during trading hours (floor, not ceiling)
+        desiredReplicas: "4"
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payments-stream
+  namespace: financial-streams
+  labels:
+    app: payments-stream
+spec:
+  selector:
+    matchLabels:
+      app: payments-stream
+  endpoints:
+    - port: management
+      path: /actuator/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+---
+# --- S2S Authorization (SPIFFE / Istio mTLS) ---
+# Deny-by-default: only listed principals can call this service's business APIs.
+# Unlisted services → 403 Forbidden. No cert → TLS handshake fails.
+# Port 9090 (management) is NOT affected — kubelet probes bypass the mesh.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: payments-stream-allow-list
+  namespace: financial-streams
+spec:
+  selector:
+    matchLabels:
+      app: payments-stream               # Applies to THIS service's pods
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            # Only these SPIFFE identities can call business APIs on port 8080.
+            # Add/remove entries as needed — anything not listed is DENIED.
+            principals:
+              - "cluster.local/ns/financial-streams/sa/coreui"
+              - "cluster.local/ns/financial-streams/sa/admin-dashboard"
+      to:
+        - operation:
+            ports: ["8080"]               # Business API port only (Swagger + REST)

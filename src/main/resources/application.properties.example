@@ -1,0 +1,86 @@
+# --- Spring / Kafka bootstrap ---
+spring.kafka.bootstrap-servers=localhost:9092
+
+# --- Transactional Producer (Exactly-Once Delivery) ---
+# "all" = all ISR replicas must ack. Zero data loss guarantee.
+spring.kafka.producer.acks=all
+# Broker deduplicates retried sends via producer ID + sequence number.
+spring.kafka.producer.enable-idempotence=true
+# Max 5 in-flight requests with idempotence. Kafka rejects out-of-order sequences.
+spring.kafka.producer.max-in-flight-requests-per-connection=5
+# Effectively infinite retries; bounded by delivery-timeout-ms.
+spring.kafka.producer.retries=2147483647
+# 5ms linger — accumulates records into batches for better throughput.
+spring.kafka.producer.linger-ms=5
+# 64KB batch size. Good for ~1-2KB financial events.
+spring.kafka.producer.batch-size=65536
+# 64MB buffer. send() blocks up to max-block-ms if full.
+spring.kafka.producer.buffer-memory=67108864
+# 2 min total delivery window including retries.
+spring.kafka.producer.delivery-timeout-ms=120000
+# 30 sec per broker request timeout.
+spring.kafka.producer.request-timeout-ms=30000
+# 60 sec max blocking when buffer full or metadata unavailable.
+spring.kafka.producer.max-block-ms=60000
+# Snappy compression: ~40-60% reduction, fast, low CPU. Options: none/gzip/snappy/lz4/zstd.
+spring.kafka.producer.compression-type=snappy
+# Transactional ID prefix. Spring appends suffix. ${random.uuid} for globally unique IDs per JVM.
+# With Deployments (not StatefulSet), pod names change on restart — zombie fencing won't work regardless.
+# UUID guarantees uniqueness without false sense of fencing. Orphans cleaned after 7 days (broker default).
+# Downstream consumers MUST set isolation.level=read_committed.
+spring.kafka.producer.transactional-id-prefix=payments-producer-${random.uuid}-
+# Broker force-aborts pending transactions after this timeout. Must be <= broker's transaction.max.timeout.ms.
+spring.kafka.producer.transaction-timeout-ms=60000
+
+# --- Topics ---
+app.input.topic=payments.input
+app.output.topic=payments.output
+
+# --- Streams core ---
+app.stream.application-id=payments-stream-v1
+app.stream.processing-guarantee=exactly_once_v2
+app.stream.num-stream-threads=1
+app.stream.commit-interval-ms=1000
+# State dir still required by Kafka Streams for task metadata, even without stateful features.
+app.stream.state-dir=/tmp/kafka-streams/payments
+app.stream.replication-factor=3
+# No standby replicas — topology is stateless (no state stores to replicate).
+app.stream.num-standby-replicas=0
+app.stream.max-task-idle-ms=1000
+
+# --- KEDA Cooperative Rebalancing & Static Membership ---
+# Static group membership: pod hostname as member identity. Prevents rebalance storms during KEDA scaling.
+app.stream.group-instance-id=${HOSTNAME:local-dev-instance}
+# Don't trigger rebalance when consumer closes gracefully (KEDA scale-down safe).
+app.stream.internal-leave-group-on-close=false
+
+# --- Streams consumer overrides ---
+app.stream.consumer.auto-offset-reset=latest
+app.stream.consumer.max-poll-records=250
+# Max time between poll() calls. 5 min matches session-timeout-ms.
+app.stream.consumer.max-poll-interval-ms=300000
+# How long Kafka waits with no heartbeat before declaring dead. 5 min for KEDA scaling tolerance.
+app.stream.consumer.session-timeout-ms=300000
+# How often consumer sends heartbeat. Must be < session-timeout-ms / 3.
+app.stream.consumer.heartbeat-interval-ms=10000
+app.stream.consumer.request-timeout-ms=30000
+app.stream.consumer.retry-backoff-ms=500
+app.stream.consumer.fetch-max-bytes=52428800
+app.stream.consumer.max-partition-fetch-bytes=1048576
+
+# --- Streams internal producer overrides ---
+app.stream.producer.acks=all
+app.stream.producer.linger-ms=5
+app.stream.producer.batch-size=65536
+app.stream.producer.buffer-memory=67108864
+
+# --- Circuit breaker ---
+app.circuit-breaker.failure-rate-threshold=20
+app.circuit-breaker.time-window-seconds=1800
+app.circuit-breaker.minimum-number-of-calls=100
+app.circuit-breaker.permitted-calls-in-half-open-state=20
+app.circuit-breaker.max-wait-in-half-open-state=2m
+app.circuit-breaker.restart-delays[0]=1m
+app.circuit-breaker.restart-delays[1]=10m
+app.circuit-breaker.restart-delays[2]=20m
+app.circuit-breaker.scheduler-delay-ms=5000
