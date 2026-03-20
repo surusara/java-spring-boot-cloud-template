@@ -324,10 +324,18 @@ spec:
 # ============================================================
 # KEDA ScaledObject — replaces HPA for Kafka lag-based scaling
 # ============================================================
-# KEDA auto-discovers partition count per topic and scales
-# replicas = count(partitions with lag). No hardcoded max needed.
-# Cooperative rebalancing + static membership ensures near-zero
-# processing disruption during scale events.
+# KEDA uses MAX (not SUM) across all triggers to compute desired replicas.
+# With limitToPartitionsWithLag=true, each Kafka trigger caps at its
+# topic's partition count. maxReplicaCount is the absolute safety ceiling.
+#
+# IMPORTANT: maxReplicaCount must equal the LARGEST topic's partition count.
+# If limitToPartitionsWithLag silently fails (KEDA version, config drift),
+# the fallback formula is: ceil(totalLag / lagThreshold) — which can far
+# exceed partition count. maxReplicaCount is your ONLY safety net.
+#
+# Topic partition counts (keep in sync with Kafka):
+#   payments.input     = 48 partitions  (consumer group: payments-stream-v1)
+#   payments.exception = 24 partitions  (consumer group: payments-exception-v1)
 # ============================================================
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -341,7 +349,10 @@ spec:
     name: payments-stream
   # Minimum pods — never go below 2 for high availability
   minReplicaCount: 2
-  # Safety cap — KEDA auto-caps at partition count (48), but explicit max is safer
+  # Safety cap — MUST equal the largest topic's partition count (payments.input = 48).
+  # Even with limitToPartitionsWithLag=true, this is essential. If that flag fails,
+  # KEDA falls back to ceil(totalLag / lagThreshold) which can reach hundreds.
+  # Without this cap, pods exceed partition count → idle pods waste AKS resources.
   maxReplicaCount: 48
   # Wait 5 min after last trigger activation before allowing scale-to-min
   cooldownPeriod: 300
@@ -398,18 +409,34 @@ spec:
         # Include persistent lag in calculations
         excludePersistentLag: "false"
 
-    # --- Trigger 2: Exception topic (6 partitions) ---
+    # --- Trigger 2: Exception topic (24 partitions) ---
+    # ARCHITECTURE: This deployment runs TWO separate Kafka Streams instances,
+    # each with its own application.id (= consumer group):
+    #   Stream 1: application.id = payments-stream-v1     → payments.input
+    #   Stream 2: application.id = payments-exception-v1  → payments.exception
+    #
+    # HOW MULTI-TRIGGER WORKS (MAX, not SUM):
+    # KEDA takes MAX across all triggers. This trigger's "vote" is capped
+    # at 24 (its partition count) when limitToPartitionsWithLag=true.
+    # HPA equation: desired = min(maxReplicaCount, max(trigger_1, trigger_2, trigger_3))
+    #
+    # RISK: If limitToPartitionsWithLag silently fails, KEDA uses the fallback
+    # formula ceil(totalLag / lagThreshold). With 100k lag:
+    #   ceil(100,000 / 500) = 200 → capped at maxReplicaCount (48)
+    # Pods beyond 24 have NO exception partition. And if payments.input has
+    # 0 lag, those pods also have nothing to do on the input stream → truly idle.
     - type: kafka
       metadata:
         bootstrapServers: kafka-broker-0.kafka-broker:9092,kafka-broker-1.kafka-broker:9092,kafka-broker-2.kafka-broker:9092
-        # Different consumer group for exception processing
+        # Must match Stream 2's application.id — each Kafka Streams app has its own consumer group
         consumerGroup: payments-exception-v1
-        # Exception topic name (6 partitions)
+        # Exception topic name (24 partitions)
         topic: payments.exception
-        # Same lag threshold
         lagThreshold: "500"
         activationLagThreshold: "10"
-        # Caps at 6 replicas max for this topic alone
+        # CRITICAL: Caps desired replicas at partition count (24).
+        # Without this, KEDA uses ceil(totalLag/lagThreshold) which ignores partition count.
+        # Verify this is actually working: kubectl get hpa -n financial-streams -o yaml
         limitToPartitionsWithLag: "true"
         offsetResetPolicy: "latest"
         allowIdleConsumers: "false"
