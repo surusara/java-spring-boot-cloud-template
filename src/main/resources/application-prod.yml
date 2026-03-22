@@ -1,0 +1,31 @@
+# Prod profile overrides
+# Activate with: SPRING_PROFILES_ACTIVE=prod (set via K8s ConfigMap)
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+# Disable Swagger in production
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+# Monitoring: Kubernetes API enabled in prod (pod has ServiceAccount token + RBAC)
+app:
+  monitoring:
+    enabled: true
+    k8s-enabled: true
+    refresh-interval-ms: 5000
+    sse-heartbeat-ms: 5000
+    # Namespace resolved from Downward API env var POD_NAMESPACE
+    namespace: ${POD_NAMESPACE:financial-streams}
+    deployment-name: payments-stream
+    pod-label-selector: app=payments-stream
+    kafka-consumer-groups:
+      - payments-stream-v1
+      - payments-exception-v1
+    lag-threshold-warning: 100
+    lag-threshold-critical: 500
+    k8s-api-timeout-ms: 3000

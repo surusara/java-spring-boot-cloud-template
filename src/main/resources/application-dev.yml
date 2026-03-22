@@ -1,0 +1,23 @@
+# Dev profile overrides
+# Activate with: SPRING_PROFILES_ACTIVE=dev
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+# Swagger enabled in dev
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+# Monitoring: Kubernetes API disabled in dev (no in-cluster token)
+app:
+  monitoring:
+    enabled: true
+    k8s-enabled: false
+    refresh-interval-ms: 5000
+    sse-heartbeat-ms: 5000
+    lag-threshold-warning: 100
+    lag-threshold-critical: 500

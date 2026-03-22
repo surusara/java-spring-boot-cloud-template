@@ -117,6 +117,10 @@ public class BusinessOutcomeCircuitBreaker {
         return nextRestartDelay;
     }
 
+    public int getOpenCount() {
+        return openCount.get();
+    }
+
     public static final class SoftBusinessFailureException extends RuntimeException {
         public SoftBusinessFailureException(String code, String message) {
             super(code + ":" + message);

@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payments Stream — Monitoring Dashboard</title>
+  <style>
+    /* ── Reset & Variables ──────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0d1117;
+      --bg2:       #161b22;
+      --bg3:       #21262d;
+      --border:    #30363d;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --accent:    #58a6ff;
+      --green:     #3fb950;
+      --yellow:    #d29922;
+      --red:       #f85149;
+      --purple:    #bc8cff;
+      --orange:    #ffa657;
+      --card-blur: blur(8px);
+      --radius:    12px;
+      --gap:       16px;
+    }
+    html { font-size: 14px; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Scrollbar ──────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ── Header ─────────────────────────────────────────────────────── */
+    .header {
+      background: linear-gradient(135deg, #1a1f2e 0%, #161b22 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: var(--card-blur);
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .logo {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, var(--accent), var(--purple));
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+    }
+    .app-title { font-size: 1.2rem; font-weight: 700; color: var(--text); }
+    .app-subtitle { font-size: 0.8rem; color: var(--muted); }
+    .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem; font-weight: 600;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+    }
+    .pill.online { border-color: var(--green); color: var(--green); }
+    .pill.offline { border-color: var(--red); color: var(--red); }
+    .timestamp { font-size: 0.75rem; color: var(--muted); }
+    .refresh-btn {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      transition: all 0.2s;
+    }
+    .refresh-btn:hover { background: var(--border); }
+    .refresh-btn.spinning svg { animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* ── Grid Layout ─────────────────────────────────────────────────── */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+      gap: var(--gap);
+      padding: 24px;
+      max-width: 1800px;
+      margin: 0 auto;
+    }
+    .grid-full { grid-column: 1 / -1; }
+    @media (max-width: 600px) {
+      .grid { grid-template-columns: 1fr; padding: 12px; }
+    }
+
+    /* ── Card ────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .card:hover { border-color: #444c56; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+    .card-header {
+      padding: 14px 18px;
+      display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(90deg, rgba(88,166,255,0.04), transparent);
+    }
+    .card-icon { font-size: 1.2rem; }
+    .card-title { font-weight: 600; font-size: 0.95rem; }
+    .card-badge {
+      margin-left: auto;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.7rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .badge-green  { background: rgba(63,185,80,0.15);  color: var(--green);  border: 1px solid rgba(63,185,80,0.3);  }
+    .badge-yellow { background: rgba(210,153,34,0.15); color: var(--yellow); border: 1px solid rgba(210,153,34,0.3); }
+    .badge-red    { background: rgba(248,81,73,0.15);  color: var(--red);    border: 1px solid rgba(248,81,73,0.3);  }
+    .badge-blue   { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+    .badge-muted  { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
+    .card-body { padding: 18px; }
+
+    /* ── Status Dot ──────────────────────────────────────────────────── */
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-green  { background: var(--green);  box-shadow: 0 0 6px var(--green);  animation: pulse-green 2s infinite; }
+    .dot-yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); animation: pulse-yellow 2s infinite; }
+    .dot-red    { background: var(--red);    box-shadow: 0 0 6px var(--red);    animation: pulse-red 1s infinite; }
+    .dot-gray   { background: var(--muted); }
+    @keyframes pulse-green  { 0%,100% { box-shadow: 0 0 4px var(--green); }  50% { box-shadow: 0 0 12px var(--green); } }
+    @keyframes pulse-yellow { 0%,100% { box-shadow: 0 0 4px var(--yellow); } 50% { box-shadow: 0 0 12px var(--yellow); } }
+    @keyframes pulse-red    { 0%,100% { box-shadow: 0 0 4px var(--red); }    50% { box-shadow: 0 0 16px var(--red); } }
+
+    /* ── Metrics row ─────────────────────────────────────────────────── */
+    .metrics-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+    .metric-box {
+      flex: 1; min-width: 90px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      text-align: center;
+    }
+    .metric-value { font-size: 1.6rem; font-weight: 700; color: var(--accent); line-height: 1.2; }
+    .metric-value.green  { color: var(--green); }
+    .metric-value.yellow { color: var(--yellow); }
+    .metric-value.red    { color: var(--red); }
+    .metric-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+    /* ── Progress bar ────────────────────────────────────────────────── */
+    .progress-wrap { margin-bottom: 10px; }
+    .progress-label { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 0.78rem; }
+    .progress-label .name { color: var(--muted); }
+    .progress-label .val  { color: var(--text); font-weight: 600; }
+    .progress-bar {
+      height: 8px; background: var(--bg3);
+      border-radius: 4px; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 4px;
+      background: linear-gradient(90deg, var(--accent), var(--purple));
+      transition: width 0.5s ease;
+    }
+    .progress-fill.green  { background: linear-gradient(90deg, var(--green), #23c55e); }
+    .progress-fill.yellow { background: linear-gradient(90deg, var(--yellow), #f59e0b); }
+    .progress-fill.red    { background: linear-gradient(90deg, var(--red), #ef4444); }
+
+    /* ── Pod Grid ────────────────────────────────────────────────────── */
+    .pod-icons { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .pod-icon {
+      width: 36px; height: 36px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      position: relative;
+      cursor: default;
+      transition: transform 0.15s;
+    }
+    .pod-icon:hover { transform: scale(1.1); }
+    .pod-icon.running { border-color: var(--green); }
+    .pod-icon.pending { border-color: var(--yellow); }
+    .pod-icon.failed  { border-color: var(--red); }
+
+    /* ── Table ───────────────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th {
+      text-align: left; padding: 8px 10px;
+      color: var(--muted); font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.7rem;
+    }
+    td { padding: 7px 10px; border-bottom: 1px solid rgba(48,54,61,0.5); color: var(--text); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.03); }
+    .tag {
+      display: inline-block; padding: 1px 7px;
+      border-radius: 10px; font-size: 0.7rem; font-weight: 600;
+    }
+    .tag-green  { background: rgba(63,185,80,0.15);  color: var(--green); }
+    .tag-yellow { background: rgba(210,153,34,0.15); color: var(--yellow); }
+    .tag-red    { background: rgba(248,81,73,0.15);  color: var(--red); }
+    .tag-blue   { background: rgba(88,166,255,0.15); color: var(--accent); }
+    .tag-gray   { background: var(--bg3); color: var(--muted); }
+
+    /* ── Lag Heatmap ─────────────────────────────────────────────────── */
+    .lag-heatmap { display: flex; flex-wrap: wrap; gap: 4px; }
+    .lag-cell {
+      width: 28px; height: 28px;
+      border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.65rem; font-weight: 700;
+      cursor: default;
+      title: "";
+    }
+    .lag-cell.ok       { background: rgba(63,185,80,0.25);  color: var(--green); }
+    .lag-cell.warning  { background: rgba(210,153,34,0.3);  color: var(--yellow); }
+    .lag-cell.critical { background: rgba(248,81,73,0.35);  color: var(--red); }
+    .lag-cell.empty    { background: var(--bg3); color: var(--muted); }
+
+    /* ── Error / loading states ──────────────────────────────────────── */
+    .loading { color: var(--muted); font-size: 0.85rem; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
+    .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+    .error-msg { color: var(--red); font-size: 0.8rem; padding: 8px 0; }
+    .note-msg  { color: var(--muted); font-size: 0.8rem; padding: 6px 0; font-style: italic; }
+
+    /* ── Section divider ─────────────────────────────────────────────── */
+    .section-title { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+
+    /* ── Scaling direction ───────────────────────────────────────────── */
+    .scale-arrow { font-size: 2rem; font-weight: 700; }
+    .scale-arrow.up   { color: var(--green); }
+    .scale-arrow.down { color: var(--red); }
+    .scale-arrow.same { color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo">⚡</div>
+    <div>
+      <div class="app-title">Payments Stream</div>
+      <div class="app-subtitle" id="header-profile">Loading…</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="pill" id="sse-pill">⬤ Connecting…</span>
+    <span class="timestamp" id="last-updated">–</span>
+    <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      Refresh
+    </button>
+  </div>
+</header>
+
+<!-- ── Main Grid ──────────────────────────────────────────────────────── -->
+<main class="grid" id="dashboard-grid">
+
+  <!-- ── Pod Scaling ───────────────────────────────────────────────── -->
+  <div class="card grid-full" id="card-scaling">
+    <div class="card-header">
+      <span class="card-icon">🐳</span>
+      <span class="card-title">Pod Scaling</span>
+      <span class="card-badge badge-blue" id="badge-scaling">–</span>
+    </div>
+    <div class="card-body">
+      <div class="metrics-row" id="scaling-metrics">
+        <div class="metric-box"><div class="metric-value" id="m-desired">–</div><div class="metric-label">Desired</div></div>
+        <div class="metric-box"><div class="metric-value" id="m-current">–</div><div class="metric-label">Current</div></div>
+        <div class="metric-box"><div class="metric-value" id="m-ready">–</div><div class="metric-label">Ready</div></div>
+        <div class="metric-box"><div class="metric-value" id="m-min">–</div><div class="metric-label">Min (HPA)</div></div>
+        <div class="metric-box"><div class="metric-value" id="m-max">–</div><div class="metric-label">Max (HPA)</div></div>
+        <div class="metric-box"><div class="scale-arrow same" id="m-direction">→</div><div class="metric-label">Direction</div></div>
+      </div>
+      <div class="section-title">Pods</div>
+      <div class="pod-icons" id="pod-icons"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Status</th><th>Ready</th><th>Age</th><th>Node</th><th>IP</th></tr></thead>
+          <tbody id="pod-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Kafka Lag ─────────────────────────────────────────────────── -->
+  <div class="card" id="card-kafka-lag">
+    <div class="card-header">
+      <span class="card-icon">📊</span>
+      <span class="card-title">Kafka Consumer Lag</span>
+      <span class="card-badge badge-green" id="badge-lag">–</span>
+    </div>
+    <div class="card-body" id="lag-body">
+      <div class="loading"><div class="spinner"></div> Loading lag data…</div>
+    </div>
+  </div>
+
+  <!-- ── Circuit Breaker ───────────────────────────────────────────── -->
+  <div class="card" id="card-cb">
+    <div class="card-header">
+      <span class="card-icon">🔌</span>
+      <span class="card-title">Circuit Breaker</span>
+      <span class="card-badge badge-green" id="badge-cb">CLOSED</span>
+    </div>
+    <div class="card-body">
+      <div class="metrics-row">
+        <div class="metric-box">
+          <div class="metric-value" id="cb-state" style="font-size:1.1rem">–</div>
+          <div class="metric-label">State</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-value" id="cb-open-count">–</div>
+          <div class="metric-label">Open Count</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-value" id="cb-delay" style="font-size:0.95rem">–</div>
+          <div class="metric-label">Next Restart</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Kafka Streams ─────────────────────────────────────────────── -->
+  <div class="card" id="card-streams">
+    <div class="card-header">
+      <span class="card-icon">🌊</span>
+      <span class="card-title">Kafka Streams</span>
+      <span class="card-badge badge-green" id="badge-streams">–</span>
+    </div>
+    <div class="card-body">
+      <div class="metrics-row">
+        <div class="metric-box"><div class="metric-value green" id="streams-state">–</div><div class="metric-label">State</div></div>
+        <div class="metric-box"><div class="metric-value" id="streams-threads">–</div><div class="metric-label">Threads</div></div>
+        <div class="metric-box"><div class="metric-value" id="streams-tasks">–</div><div class="metric-label">Active Tasks</div></div>
+      </div>
+      <div id="streams-details"></div>
+    </div>
+  </div>
+
+  <!-- ── JVM & Resources ───────────────────────────────────────────── -->
+  <div class="card" id="card-jvm">
+    <div class="card-header">
+      <span class="card-icon">☕</span>
+      <span class="card-title">JVM &amp; Resources</span>
+      <span class="card-badge badge-blue" id="badge-jvm">–</span>
+    </div>
+    <div class="card-body" id="jvm-body">
+      <div class="loading"><div class="spinner"></div> Loading JVM data…</div>
+    </div>
+  </div>
+
+  <!-- ── Pod Details (expandable) ─────────────────────────────────── -->
+  <div class="card" id="card-pod-details">
+    <div class="card-header">
+      <span class="card-icon">📋</span>
+      <span class="card-title">Current Pod (Downward API)</span>
+    </div>
+    <div class="card-body" id="pod-details-body">
+      <div class="loading"><div class="spinner"></div> Loading…</div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────
+const BASE = window.location.origin;
+const CTX  = '/api/fs';
+const API  = CTX + '/monitoring';
+let refreshInterval = 5000;
+let sseSource = null;
+let prevDesired = null;
+
+// ── SSE connection ──────────────────────────────────────────────────────
+function connectSse() {
+  if (sseSource) sseSource.close();
+  sseSource = new EventSource(API + '/sse');
+  sseSource.addEventListener('dashboard', e => {
+    try { renderDashboard(JSON.parse(e.data)); } catch (_) {}
+  });
+  sseSource.onopen  = () => updateSsePill(true);
+  sseSource.onerror = () => {
+    updateSsePill(false);
+    setTimeout(connectSse, 5000);
+  };
+}
+
+function updateSsePill(online) {
+  const p = document.getElementById('sse-pill');
+  p.textContent = online ? '⬤ Live' : '⬤ Polling';
+  p.className = 'pill ' + (online ? 'online' : 'offline');
+}
+
+// ── Manual refresh ──────────────────────────────────────────────────────
+function manualRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.add('spinning');
+  fetch(API + '/dashboard')
+    .then(r => r.json())
+    .then(d => { renderDashboard(d); btn.classList.remove('spinning'); })
+    .catch(() => btn.classList.remove('spinning'));
+}
+
+// ── Polling fallback (when SSE unavailable) ─────────────────────────────
+function startPolling() {
+  setInterval(() => {
+    if (sseSource && sseSource.readyState === EventSource.OPEN) return;
+    fetch(API + '/dashboard').then(r => r.json()).then(renderDashboard).catch(() => {});
+  }, refreshInterval);
+}
+
+// ── Master render ───────────────────────────────────────────────────────
+function renderDashboard(data) {
+  if (!data) return;
+  refreshInterval = data.refreshIntervalMs || 5000;
+  document.getElementById('last-updated').textContent =
+    'Updated: ' + new Date(data.timestamp || Date.now()).toLocaleTimeString();
+
+  if (data.meta)          renderMeta(data.meta);
+  if (data.scaling)       renderScaling(data.scaling);
+  if (data.kafkaLag)      renderKafkaLag(data.kafkaLag);
+  if (data.circuitBreaker) renderCircuitBreaker(data.circuitBreaker);
+  if (data.kafkaStreams)  renderStreams(data.kafkaStreams);
+  if (data.jvm)           renderJvm(data.jvm);
+  if (data.pod)           renderPodDetails(data.pod);
+}
+
+// ── Meta / header ───────────────────────────────────────────────────────
+function renderMeta(meta) {
+  const profiles = Array.isArray(meta.profiles) ? meta.profiles.join(', ') : (meta.profiles || 'default');
+  document.getElementById('header-profile').textContent =
+    (meta.application || 'app') + ' · ' + profiles + ' · v' + (meta.springBootVersion || '?');
+}
+
+// ── Scaling / Pods ──────────────────────────────────────────────────────
+function renderScaling(scaling) {
+  const dep = scaling.deployment || {};
+  const hpa = scaling.hpa || {};
+  const podInfo = scaling.pods || {};
+
+  const desired  = dep.desiredReplicas  ?? hpa.desiredReplicas  ?? '–';
+  const current  = dep.currentReplicas  ?? hpa.currentReplicas  ?? '–';
+  const ready    = dep.readyReplicas    ?? '–';
+  const minR     = hpa.minReplicas  ?? '–';
+  const maxR     = hpa.maxReplicas  ?? '–';
+
+  setText('m-desired', desired);
+  setText('m-current', current);
+  setText('m-ready',   ready);
+  setText('m-min',     minR);
+  setText('m-max',     maxR);
+
+  // Scale direction
+  const dir = document.getElementById('m-direction');
+  if (prevDesired !== null && desired !== '–') {
+    if (desired > prevDesired)      { dir.textContent = '↑'; dir.className = 'scale-arrow up'; }
+    else if (desired < prevDesired) { dir.textContent = '↓'; dir.className = 'scale-arrow down'; }
+    else                            { dir.textContent = '→'; dir.className = 'scale-arrow same'; }
+  }
+  if (desired !== '–') prevDesired = desired;
+
+  const badge = document.getElementById('badge-scaling');
+  badge.textContent = current + ' pod' + (current !== 1 ? 's' : '');
+
+  // Pod icons
+  const icons = document.getElementById('pod-icons');
+  icons.innerHTML = '';
+  const pods = podInfo.pods || [];
+  if (pods.length === 0 && podInfo.note) {
+    icons.innerHTML = '<span class="note-msg">' + esc(podInfo.note) + '</span>';
+  } else {
+    pods.forEach(p => {
+      const d = document.createElement('div');
+      const phase = (p.phase || '').toLowerCase();
+      d.className = 'pod-icon ' + (p.ready ? 'running' : phase === 'pending' ? 'pending' : 'failed');
+      d.textContent = '🐳';
+      d.title = p.name + ' · ' + (p.phase || 'unknown') + (p.ready ? ' · ready' : ' · not ready');
+      icons.appendChild(d);
+    });
+    // Show extra ghost icons for desired vs current diff
+    const diff = (desired !== '–' && current !== '–') ? desired - current : 0;
+    for (let i = 0; i < Math.max(0, diff); i++) {
+      const d = document.createElement('div');
+      d.className = 'pod-icon pending';
+      d.textContent = '⏳';
+      d.title = 'Pending / Starting';
+      icons.appendChild(d);
+    }
+  }
+
+  // Pod table
+  const tbody = document.getElementById('pod-table-body');
+  tbody.innerHTML = '';
+  if (pods.length === 0) {
+    if (podInfo.note) {
+      tbody.innerHTML = '<tr><td colspan="6" class="note-msg">' + esc(podInfo.note) + '</td></tr>';
+    } else if (podInfo.error) {
+      tbody.innerHTML = '<tr><td colspan="6" class="error-msg">' + esc(podInfo.error) + '</td></tr>';
+    }
+  } else {
+    pods.forEach(p => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><code>' + esc(p.name || '–') + '</code></td>' +
+        '<td>' + statusTag(p.phase || '–') + '</td>' +
+        '<td>' + readyTag(p.ready) + '</td>' +
+        '<td>' + esc(p.age || '–') + '</td>' +
+        '<td>' + esc(p.nodeName || '–') + '</td>' +
+        '<td>' + esc(p.podIp || '–') + '</td>';
+      tbody.appendChild(tr);
+    });
+  }
+}
+
+// ── Kafka Lag ───────────────────────────────────────────────────────────
+function renderKafkaLag(lagData) {
+  const body = document.getElementById('lag-body');
+  const groups = lagData.consumerGroups || [];
+  const thresholds = lagData.thresholds || { warning: 100, critical: 500 };
+
+  if (lagData.error) {
+    body.innerHTML = '<div class="error-msg">⚠ ' + esc(lagData.error) + '</div>';
+    return;
+  }
+
+  let html = '';
+  let overallSeverity = 'OK';
+
+  groups.forEach(g => {
+    const sev = g.severity || 'OK';
+    if (sev === 'CRITICAL') overallSeverity = 'CRITICAL';
+    else if (sev === 'WARNING' && overallSeverity !== 'CRITICAL') overallSeverity = 'WARNING';
+
+    html += '<div style="margin-bottom:16px;">';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">';
+    html += '<div class="dot dot-' + (sev === 'OK' ? 'green' : sev === 'WARNING' ? 'yellow' : 'red') + '"></div>';
+    html += '<strong>' + esc(g.consumerGroup) + '</strong>';
+    html += '<span class="card-badge badge-' + (sev === 'OK' ? 'green' : sev === 'WARNING' ? 'yellow' : 'red') + '">' + sev + '</span>';
+    html += '</div>';
+
+    if (g.error) {
+      html += '<div class="error-msg">' + esc(g.error) + '</div>';
+    } else {
+      html += '<div class="metrics-row">';
+      html += metricBox(fmt(g.totalLag), 'Total Lag', lagColor(g.totalLag, thresholds));
+      html += metricBox(fmt(g.maxLag), 'Max Lag', lagColor(g.maxLag, thresholds));
+      html += metricBox(fmt(g.avgLagPerPartition), 'Avg / Partition', lagColor(g.avgLagPerPartition, thresholds));
+      html += metricBox((g.partitionsWithLag || 0) + ' / ' + (g.totalPartitions || 0), 'Parts w/ Lag', 'default');
+      html += '</div>';
+
+      // Lag heatmap
+      const parts = g.partitions || [];
+      if (parts.length > 0) {
+        html += '<div class="section-title">Partition Heatmap</div>';
+        html += '<div class="lag-heatmap">';
+        parts.forEach(p => {
+          const cls = p.lag === 0 ? 'ok' : p.lag < thresholds.warning ? 'ok' : p.lag < thresholds.critical ? 'warning' : 'critical';
+          html += '<div class="lag-cell ' + cls + '" title="' + esc(p.topic) + '[' + p.partition + '] lag=' + p.lag + '">' + p.partition + '</div>';
+        });
+        html += '</div>';
+      }
+    }
+    html += '</div>';
+  });
+
+  if (groups.length === 0) {
+    html = '<div class="note-msg">No consumer groups configured.</div>';
+  }
+
+  body.innerHTML = html;
+
+  const badge = document.getElementById('badge-lag');
+  badge.textContent = overallSeverity;
+  badge.className = 'card-badge badge-' + (overallSeverity === 'OK' ? 'green' : overallSeverity === 'WARNING' ? 'yellow' : 'red');
+}
+
+function lagColor(lag, t) {
+  if (lag == null) return 'default';
+  if (lag < t.warning)  return 'green';
+  if (lag < t.critical) return 'yellow';
+  return 'red';
+}
+
+// ── Circuit Breaker ─────────────────────────────────────────────────────
+function renderCircuitBreaker(cb) {
+  const state = cb.state || '–';
+  const el = document.getElementById('cb-state');
+  el.textContent = state;
+  el.className = 'metric-value ' + (state === 'CLOSED' ? 'green' : state === 'HALF_OPEN' ? 'yellow' : state === 'OPEN' ? 'red' : '');
+
+  setText('cb-open-count', cb.openCount != null ? cb.openCount : '–');
+  setText('cb-delay', cb.nextRestartDelay || '–');
+
+  const badge = document.getElementById('badge-cb');
+  badge.textContent = state;
+  badge.className = 'card-badge ' + (state === 'CLOSED' ? 'badge-green' : state === 'HALF_OPEN' ? 'badge-yellow' : state === 'OPEN' ? 'badge-red' : 'badge-muted');
+}
+
+// ── Streams ─────────────────────────────────────────────────────────────
+function renderStreams(ks) {
+  const state = ks.state || '–';
+  const el = document.getElementById('streams-state');
+  el.textContent = state;
+  el.className = 'metric-value ' + (state === 'RUNNING' ? 'green' : state === 'REBALANCING' ? 'yellow' : 'red');
+
+  const threads = ks.threads || [];
+  setText('streams-threads', threads.length || ks.activeThreadCount || '–');
+
+  let activeTasks = 0;
+  threads.forEach(t => activeTasks += (t.activeTasks || []).length);
+  setText('streams-tasks', activeTasks || '–');
+
+  const badge = document.getElementById('badge-streams');
+  badge.textContent = state;
+  badge.className = 'card-badge ' + (state === 'RUNNING' ? 'badge-green' : state === 'REBALANCING' ? 'badge-yellow' : 'badge-red');
+
+  // Thread table
+  let det = '';
+  if (threads.length > 0) {
+    det += '<div class="section-title" style="margin-top:8px">Threads</div>';
+    det += '<div class="table-wrap"><table><thead><tr><th>Thread</th><th>State</th><th>Active</th><th>Standby</th></tr></thead><tbody>';
+    threads.forEach(t => {
+      det += '<tr><td><code>' + esc((t.threadName || '').split('.').pop() || t.threadName) + '</code></td>';
+      det += '<td>' + statusTag(t.threadState || t.state || '–') + '</td>';
+      det += '<td>' + (t.activeTasks || []).length + '</td>';
+      det += '<td>' + (t.standbyTasks || []).length + '</td></tr>';
+    });
+    det += '</tbody></table></div>';
+  }
+  if (ks.applicationId) {
+    det += '<div class="note-msg" style="margin-top:8px">app.id: ' + esc(ks.applicationId) + '</div>';
+  }
+  document.getElementById('streams-details').innerHTML = det;
+}
+
+// ── JVM ─────────────────────────────────────────────────────────────────
+function renderJvm(jvm) {
+  const body = document.getElementById('jvm-body');
+  const heapUsed  = jvm.heapUsedMB  || 0;
+  const heapMax   = jvm.heapMaxMB   || 1;
+  const heapPct   = Math.round((heapUsed / heapMax) * 100);
+  const nonHeap   = jvm.nonHeapUsedMB || 0;
+  const uptimeSec = jvm.uptimeSeconds || 0;
+  const uptime    = uptimeSec < 3600 ? Math.round(uptimeSec / 60) + 'm' : Math.round(uptimeSec / 3600) + 'h';
+
+  body.innerHTML =
+    '<div class="metrics-row">' +
+    metricBox(uptime, 'Uptime', 'default') +
+    metricBox(jvm.availableProcessors || '–', 'CPUs', 'default') +
+    metricBox(jvm.javaVersion || '–', 'Java', 'default') +
+    '</div>' +
+    progressBar('Heap', heapUsed + ' MB / ' + heapMax + ' MB', heapPct, heapPct > 85 ? 'red' : heapPct > 70 ? 'yellow' : 'green') +
+    progressBar('Non-Heap', nonHeap + ' MB', Math.min(Math.round((nonHeap / 512) * 100), 100), 'blue');
+
+  const badge = document.getElementById('badge-jvm');
+  badge.textContent = heapPct + '% heap';
+  badge.className = 'card-badge ' + (heapPct > 85 ? 'badge-red' : heapPct > 70 ? 'badge-yellow' : 'badge-blue');
+}
+
+// ── Pod Details ─────────────────────────────────────────────────────────
+function renderPodDetails(pod) {
+  const body = document.getElementById('pod-details-body');
+  body.innerHTML =
+    '<div class="table-wrap"><table><tbody>' +
+    row('Pod Name',   pod.podName) +
+    row('Namespace',  pod.namespace) +
+    row('Node Name',  pod.nodeName) +
+    row('Pod IP',     pod.podIp) +
+    row('Hostname',   pod.hostname) +
+    '</tbody></table></div>';
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function esc(s) {
+  if (s == null) return '–';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmt(n) { return n != null ? n.toLocaleString() : '–'; }
+
+function metricBox(val, label, color) {
+  const cls = color === 'default' ? '' : ' ' + color;
+  return '<div class="metric-box"><div class="metric-value' + cls + '">' + esc(val) + '</div><div class="metric-label">' + esc(label) + '</div></div>';
+}
+
+function progressBar(name, valLabel, pct, color) {
+  return '<div class="progress-wrap">' +
+    '<div class="progress-label"><span class="name">' + esc(name) + '</span><span class="val">' + esc(valLabel) + '</span></div>' +
+    '<div class="progress-bar"><div class="progress-fill ' + (color || '') + '" style="width:' + pct + '%"></div></div>' +
+    '</div>';
+}
+
+function row(label, val) {
+  return '<tr><td style="color:var(--muted);width:120px">' + esc(label) + '</td><td>' + esc(val || '–') + '</td></tr>';
+}
+
+function statusTag(phase) {
+  const p = (phase || '').toLowerCase();
+  const cls = p === 'running' ? 'tag-green' : p === 'pending' || p === 'rebalancing' ? 'tag-yellow' : p === 'failed' || p === 'error' ? 'tag-red' : 'tag-gray';
+  return '<span class="tag ' + cls + '">' + esc(phase) + '</span>';
+}
+
+function readyTag(ready) {
+  return ready
+    ? '<span class="tag tag-green">✓</span>'
+    : '<span class="tag tag-red">✗</span>';
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+connectSse();
+startPolling();
+// Initial fetch immediately
+fetch(API + '/dashboard').then(r => r.json()).then(renderDashboard).catch(() => {});
+</script>
+</body>
+</html>
