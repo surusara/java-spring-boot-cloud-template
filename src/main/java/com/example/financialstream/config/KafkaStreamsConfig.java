@@ -58,7 +58,11 @@ public class KafkaStreamsConfig {
             @Value("${app.stream.producer.acks:all}") String producerAcks,
             @Value("${app.stream.producer.linger-ms:5}") int producerLingerMs,
             @Value("${app.stream.producer.batch-size:65536}") int producerBatchSize,
-            @Value("${app.stream.producer.buffer-memory:67108864}") long producerBufferMemory) {
+            @Value("${app.stream.producer.buffer-memory:67108864}") long producerBufferMemory,
+            // --- Confluent Cloud SASL/SSL ---
+            @Value("${app.stream.security.protocol:#{null}}") String securityProtocol,
+            @Value("${app.stream.sasl.mechanism:#{null}}") String saslMechanism,
+            @Value("${app.stream.sasl.jaas.config:#{null}}") String saslJaasConfig) {
 
         Map<String, Object> props = new HashMap<>();
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
@@ -111,6 +115,19 @@ public class KafkaStreamsConfig {
         props.put("producer.linger.ms", producerLingerMs);
         props.put("producer.batch.size", producerBatchSize);
         props.put("producer.buffer.memory", producerBufferMemory);
+
+        // --- Confluent Cloud SASL/SSL ---
+        // When connecting to Confluent Cloud, security.protocol and sasl.* are required.
+        // These propagate to consumers, producers, and admin clients created from this config.
+        if (securityProtocol != null && !securityProtocol.isBlank()) {
+            props.put("security.protocol", securityProtocol);
+        }
+        if (saslMechanism != null && !saslMechanism.isBlank()) {
+            props.put("sasl.mechanism", saslMechanism);
+        }
+        if (saslJaasConfig != null && !saslJaasConfig.isBlank()) {
+            props.put("sasl.jaas.config", saslJaasConfig);
+        }
 
         return new KafkaStreamsConfiguration(props);
     }

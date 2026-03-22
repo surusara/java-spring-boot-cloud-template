@@ -1,6 +1,13 @@
 package com.example.financialstream.runtime;
 
 import com.example.financialstream.circuit.BreakerControlProperties;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult;
+import org.apache.kafka.clients.admin.ListOffsetsResult;
+import org.apache.kafka.clients.admin.OffsetSpec;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.ThreadMetadata;
 import org.slf4j.Logger;
@@ -12,6 +19,7 @@ import org.springframework.kafka.config.StreamsBuilderFactoryBean;
 import org.springframework.stereotype.Service;
 
 import java.lang.management.ManagementFactory;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -19,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Collects runtime configuration and state from all application components.
@@ -94,6 +103,7 @@ public class RuntimeDiscoveryService {
         report.put("swagger", collectSwagger());
         report.put("kafkaStreams", collectKafkaStreams());
         report.put("streamsInstanceAudit", collectStreamsInstanceAudit());
+        report.put("kafkaLag", collectKafkaLag());
         report.put("kafkaProducer", collectKafkaProducer());
         report.put("topics", collectTopics());
         report.put("database", collectDatabase());
@@ -329,6 +339,198 @@ public class RuntimeDiscoveryService {
         topics.put("input", prop("app.input.topic", "not set"));
         topics.put("output", prop("app.output.topic", "not set"));
         return topics;
+    }
+
+    // ─── Kafka Lag ──────────────────────────────────────────────────────
+
+    /**
+     * Collects consumer lag for each Kafka Streams instance's consumer group.
+     * Uses AdminClient to query committed offsets and end offsets per partition.
+     * Requires broker connectivity — wrapped in try/catch with a 5-second timeout.
+     */
+    private Map<String, Object> collectKafkaLag() {
+        Map<String, Object> lagReport = new LinkedHashMap<>();
+
+        try {
+            Map<String, StreamsBuilderFactoryBean> beans =
+                    applicationContext.getBeansOfType(StreamsBuilderFactoryBean.class);
+
+            // Resolve bootstrap servers from the primary streams config
+            String bootstrapServers = resolveBootstrapServers();
+            if (bootstrapServers == null) {
+                lagReport.put("error", "No bootstrap.servers found in Kafka Streams or Spring Kafka config");
+                return lagReport;
+            }
+
+            Properties adminProps = new Properties();
+            adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+            adminProps.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
+            adminProps.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 5000);
+
+            // Propagate SASL/SSL properties from Streams config for Confluent Cloud
+            copySecurityProperties(adminProps);
+
+            try (AdminClient adminClient = AdminClient.create(adminProps)) {
+                List<Map<String, Object>> consumerGroups = new ArrayList<>();
+
+                for (Map.Entry<String, StreamsBuilderFactoryBean> entry : beans.entrySet()) {
+                    StreamsBuilderFactoryBean factory = entry.getValue();
+                    String groupId = resolveGroupId(factory);
+                    if (groupId == null) continue;
+
+                    Map<String, Object> groupLag = collectGroupLag(adminClient, groupId);
+                    groupLag.put("beanName", entry.getKey());
+                    consumerGroups.add(groupLag);
+                }
+
+                lagReport.put("consumerGroups", consumerGroups);
+            }
+        } catch (Exception e) {
+            log.debug("Could not collect Kafka lag: {}", e.getMessage());
+            lagReport.put("error", "Failed to query broker: " + e.getMessage());
+        }
+
+        return lagReport;
+    }
+
+    private Map<String, Object> collectGroupLag(AdminClient adminClient, String groupId) {
+        Map<String, Object> groupLag = new LinkedHashMap<>();
+        groupLag.put("consumerGroup", groupId);
+
+        try {
+            // Get committed offsets for the consumer group
+            ListConsumerGroupOffsetsResult offsetsResult = adminClient.listConsumerGroupOffsets(groupId);
+            Map<TopicPartition, OffsetAndMetadata> committedOffsets =
+                    offsetsResult.partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
+
+            if (committedOffsets == null || committedOffsets.isEmpty()) {
+                groupLag.put("status", "NO_COMMITTED_OFFSETS");
+                return groupLag;
+            }
+
+            // Get end offsets for those same partitions
+            Map<TopicPartition, OffsetSpec> endOffsetRequest = new LinkedHashMap<>();
+            for (TopicPartition tp : committedOffsets.keySet()) {
+                endOffsetRequest.put(tp, OffsetSpec.latest());
+            }
+            ListOffsetsResult endOffsetsResult = adminClient.listOffsets(endOffsetRequest);
+
+            // Compute per-partition lag, grouped by topic
+            Map<String, List<Map<String, Object>>> topicPartitions = new LinkedHashMap<>();
+            Map<String, Long> topicTotalLag = new LinkedHashMap<>();
+            Map<String, Integer> topicPartitionCount = new LinkedHashMap<>();
+            long groupTotalLag = 0;
+
+            for (Map.Entry<TopicPartition, OffsetAndMetadata> entry : committedOffsets.entrySet()) {
+                TopicPartition tp = entry.getKey();
+                long committed = entry.getValue().offset();
+
+                long endOffset;
+                try {
+                    endOffset = endOffsetsResult.partitionResult(tp).get(5, TimeUnit.SECONDS).offset();
+                } catch (Exception e) {
+                    log.debug("Could not get end offset for {}: {}", tp, e.getMessage());
+                    continue;
+                }
+
+                long lag = Math.max(0, endOffset - committed);
+                groupTotalLag += lag;
+
+                String topic = tp.topic();
+                topicTotalLag.merge(topic, lag, Long::sum);
+                topicPartitionCount.merge(topic, 1, Integer::sum);
+
+                topicPartitions.computeIfAbsent(topic, k -> new ArrayList<>()).add(Map.of(
+                        "partition", tp.partition(),
+                        "committedOffset", committed,
+                        "endOffset", endOffset,
+                        "lag", lag
+                ));
+            }
+
+            // Build per-topic summary
+            List<Map<String, Object>> topics = new ArrayList<>();
+            for (String topic : topicPartitions.keySet()) {
+                Map<String, Object> topicInfo = new LinkedHashMap<>();
+                topicInfo.put("topic", topic);
+                topicInfo.put("partitionCount", topicPartitionCount.getOrDefault(topic, 0));
+                topicInfo.put("totalLag", topicTotalLag.getOrDefault(topic, 0L));
+                topicInfo.put("partitions", topicPartitions.get(topic));
+                topics.add(topicInfo);
+            }
+
+            groupLag.put("totalLag", groupTotalLag);
+            groupLag.put("topics", topics);
+
+        } catch (Exception e) {
+            log.debug("Could not collect lag for group {}: {}", groupId, e.getMessage());
+            groupLag.put("error", "Failed to query lag: " + e.getMessage());
+        }
+
+        return groupLag;
+    }
+
+    /**
+     * Security-related Kafka property prefixes that must be propagated to the AdminClient
+     * for Confluent Cloud (SASL_SSL) authentication.
+     */
+    private static final List<String> SECURITY_PROPERTY_PREFIXES = List.of(
+            "security.protocol",
+            "sasl.mechanism",
+            "sasl.jaas.config",
+            "sasl.login.",
+            "sasl.client.callback.handler.class",
+            "ssl.endpoint.identification.algorithm",
+            "ssl.truststore.",
+            "ssl.keystore.",
+            "ssl.key.password"
+    );
+
+    /**
+     * Copies security-related properties (SASL/SSL) from the Streams configuration
+     * into the target Properties. Required for AdminClient to authenticate against
+     * Confluent Cloud (SASL_SSL).
+     */
+    private void copySecurityProperties(Properties target) {
+        try {
+            Properties streamsCfg = streamsBuilder.getStreamsConfiguration();
+            if (streamsCfg == null) return;
+
+            for (String key : streamsCfg.stringPropertyNames()) {
+                for (String prefix : SECURITY_PROPERTY_PREFIXES) {
+                    if (key.equals(prefix) || key.startsWith(prefix)) {
+                        target.put(key, streamsCfg.getProperty(key));
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Could not copy security properties from streams config: {}", e.getMessage());
+        }
+    }
+
+    private String resolveBootstrapServers() {
+        // Try streams config first, fall back to spring.kafka.bootstrap-servers
+        try {
+            Properties cfg = streamsBuilder.getStreamsConfiguration();
+            if (cfg != null) {
+                String servers = cfg.getProperty("bootstrap.servers");
+                if (servers != null) return servers;
+            }
+        } catch (Exception e) {
+            log.debug("Could not read streams config for bootstrap.servers: {}", e.getMessage());
+        }
+        return prop("spring.kafka.bootstrap-servers", null);
+    }
+
+    private String resolveGroupId(StreamsBuilderFactoryBean factory) {
+        try {
+            Properties cfg = factory.getStreamsConfiguration();
+            return cfg != null ? cfg.getProperty("application.id") : null;
+        } catch (Exception e) {
+            log.debug("Could not resolve application.id: {}", e.getMessage());
+            return null;
+        }
     }
 
     // ─── Database (PostgreSQL) ──────────────────────────────────────────

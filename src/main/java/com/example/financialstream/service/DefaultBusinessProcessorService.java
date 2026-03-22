@@ -114,8 +114,10 @@ public class DefaultBusinessProcessorService implements BusinessProcessorService
                 return ProcessingResult.success("OK");
             });
 
+        } catch (IllegalStateException ex) {
+            // Hard/fatal failures must propagate — caught by StreamFatalExceptionHandler → SHUTDOWN_CLIENT → pod restart
+            throw ex;
         } catch (Exception ex) {
-            // Log but don't throw (hard failures should throw at processor level)
             log.error("Unexpected error in processor", ex);
             return ProcessingResult.successWithExceptionLogged(
                 "INTERNAL_ERROR",
