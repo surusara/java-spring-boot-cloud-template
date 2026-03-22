@@ -55,7 +55,7 @@ data:
       endpoints:
         web:
           exposure:
-            include: health,info,metrics,prometheus
+            include: health,info,metrics,prometheus,runtime,monitoring
       endpoint:
         health:
           probes:
@@ -131,6 +131,20 @@ data:
           - 10m
           - 20m
         scheduler-delay-ms: 5000
+      monitoring:
+        enabled: true
+        k8s-enabled: true
+        refresh-interval-ms: 5000
+        sse-heartbeat-ms: 5000
+        k8s-api-timeout-ms: 3000
+        namespace: ${POD_NAMESPACE:financial-streams}
+        deployment-name: payments-stream
+        pod-label-selector: app=payments-stream
+        kafka-consumer-groups:
+          - payments-stream-v1
+          - payments-exception-v1
+        lag-threshold-warning: 100
+        lag-threshold-critical: 500
 
 ---
 apiVersion: apps/v1
@@ -220,6 +234,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # --- Monitoring Dashboard ---
+            # Enables Kubernetes API calls from the pod for the monitoring dashboard.
+            # Requires RBAC: deploy k8s-rbac-monitoring.yaml before enabling.
+            - name: K8S_ENABLED
+              value: "true"
           resources:
             requests:
               cpu: 1000m
