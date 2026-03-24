@@ -6,6 +6,94 @@
 
 ---
 
+## Istio Sidecar — Diagnostics & Validation
+
+Before configuring S2S policies, confirm Istio is active on your pods and traffic flows through the mesh.
+
+### What is `istio-proxy`?
+
+When Istio injection is enabled for your namespace, every pod gets an extra sidecar container called `istio-proxy` (Envoy):
+
+```
+your-pod
+├── your-app          ← your Spring Boot container (ports 8080, 9090)
+└── istio-proxy       ← Envoy sidecar injected by Istio (intercepts all traffic)
+```
+
+### Check if Istio sidecar is injected
+
+```bash
+# List all containers in your pod — look for "istio-proxy"
+kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].name}'
+
+# Or search pod description
+kubectl describe pod <pod-name> -n <namespace> | grep -i istio
+```
+
+### Check namespace injection label
+
+```bash
+kubectl get namespace <namespace> --show-labels | grep istio
+# Expected: istio-injection=enabled
+```
+
+### Check Istio / proxy version
+
+```bash
+# Control plane version
+istioctl version
+
+# Sidecar proxy version on a specific pod
+kubectl exec <pod-name> -n <namespace> -c istio-proxy -- pilot-agent version
+```
+
+### Verify traffic is flowing through Istio
+
+```bash
+# Envoy downstream connection stats (non-zero = traffic flows through mesh)
+kubectl exec <pod-name> -n <namespace> -c istio-proxy -- \
+  curl -s localhost:15000/stats | grep downstream_cx_total
+
+# Envoy upstream clusters (services your pod can reach)
+kubectl exec <pod-name> -n <namespace> -c istio-proxy -- \
+  curl -s localhost:15000/clusters | grep health
+
+# Proxy sync status across the mesh
+istioctl proxy-status
+```
+
+### Test probe endpoint from sidecar (simulates kubelet)
+
+```bash
+# Curl the management port from inside the istio-proxy container.
+# Both containers share the pod network, so localhost:9090 reaches your app.
+kubectl exec <pod-name> -n <namespace> -c istio-proxy -- \
+  curl -s http://localhost:9090/actuator/health/liveness
+# Expected: {"status":"UP"}
+```
+
+> **No Istio?** Use your app container name instead of `istio-proxy`, or omit `-c` entirely:
+> ```bash
+> kubectl exec <pod-name> -n <namespace> -- curl -s http://localhost:9090/actuator/health/liveness
+> ```
+
+### Quick Diagnostic Reference
+
+| What | Command |
+|------|---------|
+| Sidecar injected? | `kubectl get pod <pod> -o jsonpath='{.spec.containers[*].name}'` |
+| Namespace injection? | `kubectl get ns <ns> --show-labels \| grep istio` |
+| Istio config issues? | `istioctl analyze -n <namespace>` |
+| Proxy sync status | `istioctl proxy-status` |
+| Full Envoy config | `istioctl proxy-config all <pod> -n <namespace>` |
+| Listener routes | `istioctl proxy-config listener <pod> -n <namespace>` |
+| Active connections | `kubectl exec <pod> -c istio-proxy -- curl -s localhost:15000/stats \| grep active` |
+| Envoy access logs | `kubectl logs <pod> -c istio-proxy --tail=50` |
+
+> **Tip:** If `istioctl` isn't installed locally, the `kubectl exec -c istio-proxy` commands still work — they run inside the cluster.
+
+---
+
 ## What Is SPIFFE + mTLS?
 
 SPIFFE (Secure Production Identity Framework For Everyone) gives every K8s workload a **cryptographic identity** — an X.509 certificate with a SPIFFE ID like:
