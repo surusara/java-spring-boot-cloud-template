@@ -563,3 +563,174 @@ kubectl get authorizationpolicy payments-stream-allow-list -n financial-streams 
 istioctl proxy-config listener <pod> -n financial-streams | grep 9090
 # Port 9090 should show PERMISSIVE or no policy attached
 ```
+
+---
+
+## Troubleshooting: S2S Call Denied (403 / Connection Refused)
+
+When an internal or external caller is blocked by the AuthorizationPolicy, use this section to diagnose the issue.
+
+### Typical call flow
+
+```
+Browser → Ingress/Gateway → UI pod → your-service (port 8080)
+                                         ↑
+                              AuthorizationPolicy checks SPIFFE ID here
+```
+
+### Step 1 — Check Envoy access logs on YOUR pod (most useful)
+
+```bash
+kubectl logs <your-pod> -n <namespace> -c istio-proxy --tail=100 | grep -i "RBAC\|denied\|403"
+```
+
+Look for:
+
+```
+[2026-03-24T10:15:32.123Z] "GET /api/fs/hello HTTP/1.1" 403 - via_upstream - "-" 0 19 0 - "-"
+"response_flags":"UAEX"
+```
+
+**Key Envoy response flags:**
+
+| Flag | Meaning |
+|------|---------|
+| `UAEX` | AuthorizationPolicy **DENIED** the request |
+| `NR` | No route — service not found |
+| `UF` | Upstream connection failure |
+| `URX` | Upstream retry limit exceeded |
+
+### Step 2 — Enable RBAC debug logging (temporary)
+
+If access logs don't show enough detail:
+
+```bash
+# Bump RBAC log level to debug on your pod
+istioctl proxy-config log <your-pod> -n <namespace> --level rbac:debug
+
+# Tail the logs and trigger the failing call again
+kubectl logs <your-pod> -n <namespace> -c istio-proxy -f | grep -i "rbac\|allow\|deny\|shadow"
+```
+
+You'll see lines like:
+
+```
+enforced_denied, matched policy none                    ← no rule matched → denied by default
+enforced_denied, matched policy ns[...]-policy[...]-rule[0]  ← matched a deny rule
+```
+
+**Reset after debugging:**
+```bash
+istioctl proxy-config log <your-pod> -n <namespace> --level rbac:info
+```
+
+### Step 3 — Verify the caller's actual SPIFFE ID
+
+```bash
+# From the CALLER pod, check what SPIFFE identity it presents
+kubectl exec <caller-pod> -n <caller-namespace> -c istio-proxy -- \
+  curl -s localhost:15000/certs | grep -i "uri"
+```
+
+Expected output:
+```
+"uri": "spiffe://cluster.local/ns/<caller-namespace>/sa/<caller-service-account>"
+```
+
+**Compare this exact string** with what's in your AuthorizationPolicy `principals` list.
+
+### Step 4 — Check what ServiceAccount the caller pod actually uses
+
+```bash
+kubectl get pod <caller-pod> -n <caller-namespace> -o jsonpath='{.spec.serviceAccountName}'
+```
+
+If this returns `default`, the caller isn't using a dedicated ServiceAccount — its SPIFFE ID will be `cluster.local/ns/<ns>/sa/default`, which likely doesn't match your policy.
+
+### Step 5 — Compare policy vs actual identity
+
+```bash
+# What principals are allowed on your service?
+kubectl get authorizationpolicy -n <your-namespace> \
+  -o jsonpath='{.items[*].spec.rules[*].from[*].source.principals[*]}'
+```
+
+---
+
+### Most Common Causes for Denied Calls
+
+| # | Cause | How to verify | Fix |
+|---|-------|--------------|-----|
+| 1 | **Wrong namespace** in principal | Check caller pod's actual namespace | Fix: `cluster.local/ns/<correct-ns>/sa/<sa>` |
+| 2 | **Wrong ServiceAccount name** | `kubectl get pod <caller> -o jsonpath='{.spec.serviceAccountName}'` | Fix: use the actual SA name in principal |
+| 3 | **Caller has no sidecar** (no SPIFFE cert) | `kubectl get pod <caller> -o jsonpath='{.spec.containers[*].name}'` — no `istio-proxy` | Enable injection on caller namespace or pod |
+| 4 | **Caller uses `default` ServiceAccount** | SA shows `default` instead of a named one | Create a dedicated SA for the caller and reference it in the Deployment |
+| 5 | **Caller goes via Ingress Gateway** | Traffic arrives from `istio-ingressgateway`, not the caller pod | Add `cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account` to principals |
+| 6 | **PeerAuthentication STRICT** but caller has no sidecar | TLS handshake fails before AuthzPolicy evaluates | Enable sidecar injection on caller, or set caller namespace to PERMISSIVE |
+
+> **#1 and #2 are the most frequent causes.** The SPIFFE ID in your policy doesn't match what the caller pod actually presents.
+
+### Quick Diagnostic Script
+
+Run this all at once to gather the key data:
+
+```bash
+# ── Caller side ──
+
+# 1. What ServiceAccount does the caller pod use?
+kubectl get pod <caller-pod> -n <caller-namespace> \
+  -o jsonpath='ServiceAccount: {.spec.serviceAccountName}{"\n"}'
+
+# 2. Does the caller pod have istio-proxy?
+kubectl get pod <caller-pod> -n <caller-namespace> \
+  -o jsonpath='Containers: {.spec.containers[*].name}{"\n"}'
+
+# 3. What SPIFFE ID does the caller present?
+kubectl exec <caller-pod> -n <caller-namespace> -c istio-proxy -- \
+  curl -s localhost:15000/certs 2>/dev/null | grep uri
+
+# ── Your service side ──
+
+# 4. What principals are allowed?
+kubectl get authorizationpolicy -n <your-namespace> \
+  -o jsonpath='{.items[*].spec.rules[*].from[*].source.principals[*]}'
+
+# 5. Check deny logs
+kubectl logs <your-pod> -n <your-namespace> -c istio-proxy --tail=50 | grep "403\|RBAC\|UAEX"
+```
+
+### Example Fix: Adding an External UI Caller
+
+If the UI pod is in namespace `frontend-ns` with ServiceAccount `coreui-frontend`:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: payments-stream-allow-list
+  namespace: financial-streams
+spec:
+  selector:
+    matchLabels:
+      app: payments-stream
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              # Internal (same namespace)
+              - "cluster.local/ns/financial-streams/sa/internal-svc"
+              # External UI (different namespace) — add this
+              - "cluster.local/ns/frontend-ns/sa/coreui-frontend"
+      to:
+        - operation:
+            ports: ["8080"]
+```
+
+After applying, verify:
+```bash
+# From the UI pod, test the call
+kubectl exec <ui-pod> -n frontend-ns -c istio-proxy -- \
+  curl -s http://payments-stream.financial-streams.svc.cluster.local:8080/api/fs/hello
+# Expected: 200 OK
+```
