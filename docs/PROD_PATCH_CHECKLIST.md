@@ -180,7 +180,61 @@ After patching the prod project, verify:
 - `consumer.internal.leave.group.on.close=false` is actually present in effective runtime config
 - `commit.interval.ms` is the value you intend to run with
 
-## 10. Most Important Reality Check
+## 10. Upgrade Kafka Libraries to `3.9.2`
+
+If the target production project uses the Spring Boot parent BOM like this reference project, do **not** add versions on the Kafka dependencies directly. Add this property in `pom.xml` instead:
+
+```xml
+<properties>
+    <kafka.version>3.9.2</kafka.version>
+</properties>
+```
+
+Keep dependencies like this:
+
+```xml
+<dependency>
+    <groupId>org.springframework.kafka</groupId>
+    <artifactId>spring-kafka</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.apache.kafka</groupId>
+    <artifactId>kafka-streams</artifactId>
+</dependency>
+```
+
+Why:
+- Spring Boot manages the Kafka versions through dependency management
+- overriding `kafka.version` upgrades `kafka-streams`, `kafka-clients`, and related Kafka artifacts together
+- this is the smallest safe change when moving from `3.9.1` to `3.9.2`
+
+## 11. How to Check the Upgrade
+
+After changing `pom.xml`, run:
+
+```bash
+mvn dependency:tree -Dincludes=org.apache.kafka:kafka-streams,org.apache.kafka:kafka-clients
+```
+
+Expected result:
+- `org.apache.kafka:kafka-streams:jar:3.9.2`
+- `org.apache.kafka:kafka-clients:jar:3.9.2`
+
+Optional sanity check:
+
+```bash
+mvn help:evaluate -Dexpression=kafka.version -q -DforceStdout
+```
+
+Expected result:
+
+```text
+3.9.2
+```
+
+If the target prod project does **not** use Spring Boot dependency management, then set the Kafka version directly on the dependency instead of using the `kafka.version` property.
+
+## 12. Most Important Reality Check
 
 These changes improve correctness of the Kafka Streams consumer config, but they do **not** eliminate replay duplicates by themselves.
 
@@ -193,3 +247,34 @@ Replay duplicates can still happen when:
 5. output is published again
 
 That is expected `at_least_once` behavior for this architecture.
+
+
+
+What I found from Apache sources:
+
+3.9.1 was released on May 20/21, 2025 as a bug-fix release: https://kafka.apache.org/blog/2025/05/20/apache-kafka-3.9.1-release-announcement/ and https://kafka.apache.org/community/downloads/
+3.9.2 was released on February 21, 2026 as another bug-fix release with “critical fixes”: https://kafka.apache.org/blog/2026/02/21/apache-kafka-3.9.2-release-announcement/
+The latest major release I found is 4.2.0 on February 17, 2026: https://kafka.apache.org/blog/2026/02/17/apache-kafka-4.2.0-release-announcement/
+The most relevant bug I found for your symptom is:
+
+KAFKA-19242: “Fix commit bugs caused by race condition during rebalancing”
+Fixed in 3.9.2, 4.0.1, 4.1.0
+Link: https://issues.apache.org/jira/browse/KAFKA-19242
+Why that matters:
+
+your problem is around rebalancing + commits + replay
+this bug is exactly in that neighborhood
+even though it is in the clients layer, Kafka Streams relies on that consumer group machinery
+One important thing the sources also show:
+
+KAFKA-18943 was a rare Kafka Streams duplicate bug around revocation/commit, but it was fixed in 3.9.1
+Link: https://issues.apache.org/jira/browse/KAFKA-18943
+so that particular Streams duplicate bug is already fixed in your current version
+My recommendation:
+
+Yes, upgrade at least to 3.9.2
+No, I would not say you must jump to the latest major (4.2.0) first
+safest path for production is usually:
+3.9.1 → 3.9.2
+retest rebalance/duplicate scenario
+only then consider a major upgrade if needed

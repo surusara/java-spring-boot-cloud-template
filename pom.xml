@@ -19,6 +19,7 @@
         <java.version>21</java.version>
         <resilience4j.version>2.2.0</resilience4j.version>
         <maven.compiler.release>21</maven.compiler.release>
+        <kafka.version>3.9.2</kafka.version>
     </properties>
 
     <dependencies>
