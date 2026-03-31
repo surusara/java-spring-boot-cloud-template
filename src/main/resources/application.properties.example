@@ -38,7 +38,7 @@ app.output.topic=payments.output
 
 # --- Streams core ---
 app.stream.application-id=payments-stream-v1
-app.stream.processing-guarantee=exactly_once_v2
+app.stream.processing-guarantee=at_least_once
 app.stream.num-stream-threads=1
 app.stream.commit-interval-ms=1000
 # State dir still required by Kafka Streams for task metadata, even without stateful features.
@@ -56,6 +56,8 @@ app.stream.internal-leave-group-on-close=false
 
 # --- Streams consumer overrides ---
 app.stream.consumer.auto-offset-reset=latest
+# Hide aborted transactional writes from upstream producers. No effect if source writers are non-transactional.
+app.stream.consumer.isolation-level=read_committed
 app.stream.consumer.max-poll-records=250
 # Max time between poll() calls. 5 min matches session-timeout-ms.
 app.stream.consumer.max-poll-interval-ms=300000

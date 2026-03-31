@@ -76,7 +76,7 @@ data:
         topic: payments.output
       stream:
         application-id: payments-stream-v1
-        processing-guarantee: exactly_once_v2
+        processing-guarantee: at_least_once
         # [Default] Single stream thread. Increase for higher parallelism per pod.
         num-stream-threads: 1
         commit-interval-ms: 1000
@@ -90,6 +90,7 @@ data:
         max-task-idle-ms: 1000
         consumer:
           auto-offset-reset: latest
+          isolation-level: read_committed
           max-poll-records: 250
           # 12 min: must be >= session-timeout-ms. Covers max circuit breaker delay (10m) + 2m buffer.
           max-poll-interval-ms: 720000

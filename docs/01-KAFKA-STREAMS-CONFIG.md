@@ -139,7 +139,7 @@ app:
     topic: payments.output
   stream:
     application-id: payments-stream-v1
-    processing-guarantee: exactly_once_v2
+    processing-guarantee: at_least_once
     num-stream-threads: 1
     commit-interval-ms: 1000
     state-dir: /tmp/kafka-streams
@@ -154,6 +154,7 @@ app:
     # --- Consumer Overrides ---
     consumer:
       auto-offset-reset: latest
+      isolation-level: read_committed
       max-poll-records: 250
       max-poll-interval-ms: 300000
       session-timeout-ms: 300000
@@ -178,7 +179,7 @@ app:
 | Property | Value | Why |
 |----------|-------|-----|
 | `application-id` | `payments-stream-v1` | Consumer group ID for Kafka Streams. All pods with the same ID share partitions. Append version suffix (`-v1`) to force fresh offsets during schema/topology changes |
-| `processing-guarantee` | `exactly_once_v2` | Atomic read-process-write. Requires Kafka 2.5+ brokers. Spring Kafka handles `TransactionManager` internally. Financial data — no duplicates, no loss |
+| `processing-guarantee` | `at_least_once` | Offsets are committed periodically after processing. If the app crashes or rebalances before the next commit, the same input records can be replayed. Use idempotent downstream handling or dedupe keys for financial data |
 | `num-stream-threads` | `1` | One stream thread per pod. KEDA scales pods horizontally, not threads. More threads per pod = more rebalance complexity for no benefit |
 | `commit-interval-ms` | `1000` | Offset commit frequency. Lower = less re-processing on crash. Higher = better throughput. 1s is ideal for financial data |
 | `state-dir` | `/tmp/kafka-streams` | Kafka Streams creates subdirs per `application.id`. In K8s, `emptyDir` is mounted here because `readOnlyRootFilesystem: true` blocks `/tmp` writes |
@@ -189,6 +190,18 @@ app:
 ---
 
 ## 1.3 Static Membership — Explained
+
+### Kafka 3.9 Rebalancing Mode — Enforce Cooperative, Ban `upgrade.from`
+
+In Kafka Streams 3.9, cooperative rebalancing is the normal path **as long as `upgrade.from` is not set**. The `upgrade.from` config is a **temporary compatibility flag for rolling upgrades** from older Kafka Streams versions. If it is left behind after an upgrade, Kafka Streams may stay on the older eager rebalance path, which revokes more work up front and is much more disruptive during scale events.
+
+This service enforces cooperative behavior defensively:
+
+- `KafkaStreamsConfig.java` builds the Streams config map manually and does **not** bind any `upgrade.from` property
+- Startup now **fails fast** if any of these properties are present: `upgrade.from`, `spring.kafka.streams.properties.upgrade.from`, `app.stream.upgrade-from`, or `app.stream.upgrade.from`
+- This means there is no supported way in this service to opt back into the compatibility path by accident
+
+> **Important:** There is no separate `partition.assignment.strategy` switch you need to set for Kafka Streams here. In this codebase, the only practical way to regress away from cooperative rebalancing is to reintroduce `upgrade.from`.
 
 These three properties work together to prevent rebalance storms during KEDA scale-up/down:
 
@@ -209,6 +222,7 @@ These properties configure the Kafka Streams **internal consumer** that reads fr
 | Property | Value | Why |
 |----------|-------|-----|
 | `auto-offset-reset` | `latest` | When the consumer group has no committed offset (first join or reset), start from the latest message. Don't replay historical data. Use `earliest` only if you need full replay on fresh deployment |
+| `isolation-level` | `read_committed` | If upstream producers use Kafka transactions, hide aborted writes so the stream does not process records that were never committed. This does **not** stop replay duplicates from `at_least_once`; it only filters aborted transactional input |
 | `max-poll-records` | `250` | Max records returned per `poll()` call. 250 keeps processing loops responsive and gives meaningful progress between commits. Too high = long processing gaps between heartbeats |
 | `max-poll-interval-ms` | `300000` (5 min) | Max time between `poll()` calls before Kafka kicks the consumer from the group. Must be greater than the longest possible batch processing time. 5 min matches `session-timeout-ms` for consistent behavior |
 | `session-timeout-ms` | `300000` (5 min) | How long Kafka waits without a heartbeat before declaring the consumer dead. Coordinated with KEDA cooldown — prevents premature rebalance during scale events |
@@ -222,7 +236,7 @@ These properties configure the Kafka Streams **internal consumer** that reads fr
 
 ## 1.5 Internal Producer Overrides — Explained
 
-Kafka Streams has an **internal producer** used when `processing-guarantee: exactly_once_v2` is set. This producer writes to output topics and internal changelog/repartition topics as part of the atomic transaction. These overrides tune that internal producer:
+Kafka Streams has an **internal producer** for repartition/changelog/output work inside the topology. With `at_least_once`, it is a normal producer, not a transactional exactly-once boundary. These overrides tune that internal producer:
 
 | Property | Value | Why |
 |----------|-------|-----|
@@ -248,7 +262,7 @@ public class KafkaStreamsConfig {
     public KafkaStreamsConfiguration paymentsStreamsConfiguration(
             @Value("${spring.kafka.bootstrap-servers:localhost:9092}") String bootstrapServers,
             @Value("${app.stream.application-id:payments-stream-v1}") String applicationId,
-            @Value("${app.stream.processing-guarantee:exactly_once_v2}") String processingGuarantee,
+            @Value("${app.stream.processing-guarantee:at_least_once}") String processingGuarantee,
             @Value("${app.stream.num-stream-threads:1}") int numStreamThreads,
             @Value("${app.stream.commit-interval-ms:1000}") int commitIntervalMs,
             @Value("${app.stream.state-dir:/tmp/kafka-streams}") String stateDir,
@@ -442,8 +456,8 @@ spring:
 
 | Property | Value | Why |
 |----------|-------|-----|
-| `transactional-id-prefix` | `payments-producer-${random.uuid}-` | Enables Kafka transactions. Spring appends a unique suffix per producer instance. `${random.uuid}` guarantees globally unique IDs across all pods/restarts |
-| `transaction-timeout-ms` | `60000` (60 sec) | How long broker waits before force-aborting a pending transaction. Prevents zombie transactions from blocking consumers with `read_committed` isolation. Must be `<=` broker's `transaction.max.timeout.ms` (default 900s) |
+| `transactional-id-prefix` | `payments-producer-${random.uuid}-` | Enables Kafka transactions for the **standalone `KafkaTemplate` producer only**. Spring appends a unique suffix per producer instance. `${random.uuid}` guarantees globally unique IDs across all pods/restarts |
+| `transaction-timeout-ms` | `60000` (60 sec) | How long broker waits before force-aborting a pending transaction for that standalone producer. Must be `<=` broker's `transaction.max.timeout.ms` (default 900s) |
 
 **Why `${random.uuid}` instead of `${HOSTNAME}`:**
 - With **Deployments** (not StatefulSets), pod names change on every restart
@@ -451,9 +465,15 @@ spring:
 - UUID is honest: guaranteed uniqueness, no false sense of fencing
 - If you switch to StatefulSet, consider `${HOSTNAME}` for real zombie fencing
 
-**Why transactions at all:**
-- Without: a crash between `send()` and Streams commit → duplicate output on replay
-- With: output is committed atomically — downstream consumers (`read_committed`) skip uncommitted records
+**What these transactions do and do NOT do:**
+- They apply only to the separate plain producer in `KafkaProducerConfig.java`
+- They do **not** control Kafka Streams consumer offset commits
+- They do **not** prevent input replay when the Streams app runs with `at_least_once`
+- They only guarantee that this producer's own writes are committed or aborted as a unit
+
+**Impact in this architecture:**
+- If the producer transaction commits and Kafka Streams has not yet committed the input offset, a restart or rebalance can replay the same input record
+- That replay can call the producer again and emit a duplicate output record unless downstream processing is idempotent or deduplicated
 
 **Orphan cleanup:** Orphaned transactional IDs from crashed pods are auto-cleaned by the broker after `transactional.id.expiration.ms` (default 7 days). No manual intervention needed.
 
@@ -667,6 +687,8 @@ public class FinancialStreamApplication {
 ---
 
 ## Key Design Decisions Summary
+
+> **Current project default:** `processing-guarantee=at_least_once`. If any older row below still mentions `exactly_once_v2`, treat it as historical guidance rather than the active runtime setting.
 
 | Decision | Choice | Why |
 |----------|--------|-----|
