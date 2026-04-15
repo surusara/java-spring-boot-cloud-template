@@ -1,5 +1,16 @@
 # code-review-graph — Enterprise Adoption Guide
 
+{
+	"servers": {
+		"my-mcp-server-1c477f9c": {
+			"type": "stdio",
+			"command": "code-review-graph",
+			"args": ["serve"]
+		}
+	}
+}
+
+
 **Purpose**: Reduce AI coding assistant token consumption by 4.9x–27.3x through structural codebase indexing, enabling faster reviews, lower costs, and precise context delivery.
 
 **Version evaluated**: v2.1.0 (April 2026)  
