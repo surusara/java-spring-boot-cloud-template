@@ -14,7 +14,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.Environment;
 import org.springframework.kafka.config.KafkaStreamsConfiguration;
 import org.springframework.kafka.config.StreamsBuilderFactoryBean;
 import org.springframework.kafka.support.serializer.JsonSerde;
@@ -26,19 +25,11 @@ import java.util.Map;
 @EnableConfigurationProperties(BreakerControlProperties.class)
 public class KafkaStreamsConfig {
 
-    static final String[] FORBIDDEN_UPGRADE_FROM_PROPERTIES = {
-            "upgrade.from",
-            "spring.kafka.streams.properties.upgrade.from",
-            "app.stream.upgrade-from",
-            "app.stream.upgrade.from"
-    };
-
     @Bean(name = "paymentsStreamsConfiguration")
     public KafkaStreamsConfiguration paymentsStreamsConfiguration(
-            Environment environment,
             @Value("${spring.kafka.bootstrap-servers:localhost:9092}") String bootstrapServers,
             @Value("${app.stream.application-id:payments-stream-v1}") String applicationId,
-            @Value("${app.stream.processing-guarantee:at_least_once}") String processingGuarantee,
+            @Value("${app.stream.processing-guarantee:exactly_once_v2}") String processingGuarantee,
             @Value("${app.stream.num-stream-threads:1}") int numStreamThreads,
             @Value("${app.stream.commit-interval-ms:1000}") int commitIntervalMs,
             @Value("${app.stream.state-dir:/tmp/kafka-streams}") String stateDir,
@@ -50,7 +41,6 @@ public class KafkaStreamsConfig {
             // Don't trigger rebalance on graceful close. Combined with session-timeout-ms, KEDA can remove pods safely.
             @Value("${app.stream.internal-leave-group-on-close:false}") boolean internalLeaveGroupOnClose,
             @Value("${app.stream.consumer.auto-offset-reset:latest}") String autoOffsetReset,
-            @Value("${app.stream.consumer.isolation-level:read_committed}") String consumerIsolationLevel,
             @Value("${app.stream.consumer.max-poll-records:250}") int maxPollRecords,
             // 12 min: must be >= session-timeout-ms. Covers max circuit breaker delay (10m) + 2m buffer.
             @Value("${app.stream.consumer.max-poll-interval-ms:720000}") int maxPollIntervalMs,
@@ -73,8 +63,6 @@ public class KafkaStreamsConfig {
             @Value("${app.stream.security.protocol:#{null}}") String securityProtocol,
             @Value("${app.stream.sasl.mechanism:#{null}}") String saslMechanism,
             @Value("${app.stream.sasl.jaas.config:#{null}}") String saslJaasConfig) {
-
-        validateCooperativeRebalancingConfig(environment);
 
         Map<String, Object> props = new HashMap<>();
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
@@ -108,7 +96,6 @@ public class KafkaStreamsConfig {
         props.put("consumer.internal.leave.group.on.close", internalLeaveGroupOnClose);
 
         props.put("main.consumer.auto.offset.reset", autoOffsetReset);
-        props.put("consumer.isolation.level", consumerIsolationLevel);
         props.put("consumer.max.poll.records", maxPollRecords);
         props.put("consumer.max.poll.interval.ms", maxPollIntervalMs);
         props.put("consumer.session.timeout.ms", sessionTimeoutMs);
@@ -146,20 +133,6 @@ public class KafkaStreamsConfig {
         }
 
         return new KafkaStreamsConfiguration(props);
-    }
-
-    static void validateCooperativeRebalancingConfig(Environment environment) {
-        for (String propertyName : FORBIDDEN_UPGRADE_FROM_PROPERTIES) {
-            String value = environment.getProperty(propertyName);
-            if (value != null && !value.isBlank()) {
-                throw new IllegalStateException(
-                        "Kafka Streams cooperative rebalancing is enforced in this service. "
-                                + "Remove '" + propertyName + "=" + value + "'. "
-                                + "'upgrade.from' is only a temporary compatibility flag during a version upgrade; "
-                                + "keeping it set can downgrade Kafka Streams back to the older eager rebalance path."
-                );
-            }
-        }
     }
 
     @Bean(name = "paymentsStreamsBuilder")
