@@ -1,7 +1,7 @@
 # Circuit Breaker Template — Adoption Guide
 
 > **Purpose:** Step-by-step guide for adopting the Kafka Streams circuit breaker pattern into any project.  
-> **Target projects:** `trade-ingestion-service`, `trade-consumer-service`, or any Kafka Streams consumer.  
+> **Target projects:** Any Kafka Streams consumer.  
 > **Stack:** Spring Boot 3.x, Kafka Streams 3.9.x, Confluent Cloud (CSFLE), PostgreSQL, Resilience4j.
 
 ---
@@ -38,9 +38,240 @@
                     └─────────────────────────────────────────────────────┘
 ```
 
-**Key design decision:** When breaker opens, the stream is **stopped** (`stop()`), not paused (`pause()`).
-- `pause()` = consumer keeps fetching → internal buffers fill → 5GB in 10 min → OOM
-- `stop()` = consumer goes offline → no buffering → safe pause
+**Key design decision:** When the breaker opens, the stream is **stopped** (`stop()` → `KafkaStreams.close()`), not paused (`pause()`).
+- `pause()` = StreamThreads stay alive and keep calling `poll()` to hold group membership → records keep being fetched until Kafka Streams' backpressure caps the buffer at `input.buffer.max.bytes` (**default 512 MB**). Bounded, but a sustained ~512 MB working set for a long hold → real memory pressure / GC on a tight pod.
+- `stop()` = consumer goes **offline** → nothing is fetched, buffered records are released → memory held during the hold is **≈ 0**. This is why this template uses `stop()`.
+
+> **Threading note (critical):** Resilience4j fires its state-transition listener **synchronously on the StreamThread** that crossed the threshold. Calling `close()` directly on that thread makes it try to join itself → blocks for the full close timeout → unclean shutdown. The lifecycle controller therefore **offloads `stop()`/`start()` to a dedicated single-thread executor** so the blocking call never runs on a StreamThread. See the [Lifecycle Controller — Executor Offload Pattern](#lifecycle-controller--executor-offload-pattern-critical) section below for the full code and retrofit rules.
+
+---
+
+## Maximum Safe Stop Duration & Long Outages
+
+> **TL;DR:** A single stop must stay **under `session.timeout.ms`**, and `session.timeout.ms` is capped by the broker at **30 minutes** (Confluent Cloud, fixed). So the **absolute max for one uninterrupted stop is ~30 min**. For longer outages, loop in sub-30-min cycles **and alert**, or let ops/KEDA take the pod down.
+
+### Why the limit exists
+
+While stopped, `KafkaStreams.close()` shuts the consumer down completely — **no heartbeats are sent**. Because `internal.leave.group.on.close=false` suppresses the `LeaveGroup` request, the group coordinator keeps this member's partitions **reserved** — but only for `session.timeout.ms` after the last heartbeat. Exceed that and the member is evicted → **rebalance** on both the stop and the eventual resume.
+
+`session.timeout.ms` itself cannot exceed the broker's `group.max.session.timeout.ms`, whose default is **1,800,000 ms = 30 min**. On Confluent Cloud this ceiling is **fixed** — you cannot raise it.
+
+| Bound | Value |
+|---|---|
+| Max single stop without rebalance | **< `session.timeout.ms`** |
+| Max `session.timeout.ms` (broker ceiling) | **30 min** (Confluent Cloud, fixed) |
+| **Absolute max for one uninterrupted stop** | **~30 min** |
+
+**Rules of thumb**
+- Keep **every** `restart-delay` a margin under `session.timeout.ms` (e.g. a 25 min stop with a 30 min session timeout — leaves room for the resume heartbeat to land).
+- Keep `session.timeout.ms ≤ 30 min` (the broker won't accept more on Confluent Cloud).
+- Keep `max.poll.interval.ms ≥ session.timeout.ms`. It does **not** tick while stopped (no poll loop is running), but it guards the first batch after resume.
+
+### Long outages (hours) — do NOT hold it in the app
+
+For a downstream outage lasting **2–3 hours**, holding the stream stopped in-process is the wrong tool:
+- You **cannot** set a single stop > 30 min (broker ceiling), so one long stop is impossible on Confluent Cloud.
+- Even if you could, parking partitions for hours **blocks failover, grows lag silently, and hides the incident**.
+
+Two correct patterns:
+
+1. **Loop in sub-session-timeout cycles + alert (recommended automated fallback).** Keep each stop **< `session.timeout.ms`** (e.g. 25–30 min). After the backoff, the scheduler briefly resumes (HALF-OPEN probe); if the downstream is still failing, the breaker re-opens and stops for **another** cycle. This repeats indefinitely (e.g. 30 + 30 + 30 …) until the dependency recovers or a human intervenes — partitions stay reserved the whole time **because each individual stop is under the ceiling**. The brief resume between cycles re-establishes heartbeats and resets the session timer. **Pair every OPEN with an alert.**
+2. **Alert + ops/KEDA decision for very long outages.** Beyond ~1 hour, fire a high-severity alert and let production support stop the pod — or scale the deployment to zero via KEDA — until the dependency is healthy. This frees partitions cleanly and makes the outage **visible**, instead of a pod silently looping for hours.
+
+> **Recommendation:** “Max 30 min, then loop 30 + 30 until someone restarts” is the right automated bridge **provided** (a) each cycle stays under `session.timeout.ms`, and (b) every OPEN emits an alert. Use the loop for short-to-medium outages; for multi-hour outages, treat the **alert** as the primary mechanism and let humans/KEDA take the pod down.
+
+### Alerting on Breaker OPEN (required)
+
+The loop-and-alert strategy only works if OPEN actually pages someone. The app **already emits** the signals you need:
+
+| Signal | Source | Use for |
+|---|---|---|
+| ERROR log `🔴 BREAKER OPEN (attempt #n)` | `BusinessOutcomeCircuitBreaker` state listener | Log-based alerting |
+| Gauge `circuit_breaker_current_state` (0=CLOSED, 1=OPEN, 2=HALF_OPEN) | `CircuitBreakerMetrics` | **Primary** metric alert |
+| Gauge `circuit_breaker_next_restart_delay_seconds` | `CircuitBreakerMetrics` | Dashboards |
+| Gauge `circuit_breaker_open_count_total` | `CircuitBreakerMetrics` | Flapping detection |
+
+What's missing out-of-the-box is the **alert rule**. Add this `PrometheusRule` (or the equivalent in your alerting stack):
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: circuit-breaker-alerts
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: circuit-breaker
+      rules:
+        # Breaker opened — processing is paused. Page on-call.
+        - alert: CircuitBreakerOpen
+          expr: circuit_breaker_current_state{breaker="payments-business-soft-failure"} == 1
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "Circuit breaker OPEN on {{ $labels.pod }}"
+            description: "Soft-failure rate tripped the breaker. Stream is stopped and looping recovery."
+
+        # Still OPEN past one full max cycle (~30m stop + probe) — likely a sustained outage.
+        # Escalate: production support should decide whether to take the pod down / scale to zero.
+        - alert: CircuitBreakerStuckOpen
+          expr: circuit_breaker_current_state{breaker="payments-business-soft-failure"} == 1
+          for: 35m
+          labels: { severity: critical }
+          annotations:
+            summary: "Circuit breaker STUCK OPEN > 35m on {{ $labels.pod }}"
+            description: "Breaker has looped past a full max cycle. Treat as a multi-hour outage: page ops, consider KEDA scale-to-zero until the dependency recovers."
+
+        # Opened repeatedly in a short window — flapping dependency.
+        - alert: CircuitBreakerFlapping
+          expr: changes(circuit_breaker_open_count_total{breaker="payments-business-soft-failure"}[1h]) > 3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Circuit breaker flapping on {{ $labels.pod }}"
+            description: "Breaker opened more than 3 times in the last hour."
+```
+
+> **Why no code change for alerting?** Breaker OPEN already produces an ERROR log and updates `circuit_breaker_current_state`. Alerting is a **rule** over those signals, not application logic — keeping it in Prometheus means ops can tune thresholds without a redeploy. The `CircuitBreakerStuckOpen` rule (`for: 35m`) is the operational trigger that turns "loop forever" into "a human/KEDA decides" for multi-hour outages.
+
+---
+
+## Lifecycle Controller — Executor Offload Pattern (Critical)
+
+> **TL;DR:** The lifecycle controller **must** offload `StreamsBuilderFactoryBean.stop()` / `start()` to a dedicated single-thread executor. Doing it inline causes the StreamThread to join itself and shut down uncleanly. This section gives you the exact code, plus the rules a reviewer will check during a retrofit.
+
+### Why this matters
+
+Resilience4j fires its `onStateTransition(OPEN)` listener **synchronously on the StreamThread** that crossed the failure threshold (the OPEN transition happens inside `circuitBreaker.onError(...)`, which runs inside the processor's `record(...)` call).
+
+The listener calls `lifecycleController.stopStream()` → `StreamsBuilderFactoryBean.stop()` → `KafkaStreams.close()`. `close()` **blocks until all StreamThreads terminate — including the calling one**. A thread cannot join itself, so the call blocks for the full close timeout and shuts down **uncleanly**.
+
+### The pattern
+
+Flip the breaker-intent flag **synchronously** (so `isStoppedByBreaker()` is instantly correct), but run the **blocking** `stop()`/`start()` on a dedicated single-thread daemon executor so it never runs on a StreamThread. Revert intent on failure (don't rethrow from the executor — the recovery scheduler retries). Shut the executor down in `@PreDestroy`.
+
+```java
+package com.example.financialstream.circuit;
+
+import jakarta.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.kafka.config.StreamsBuilderFactoryBean;
+import org.springframework.stereotype.Component;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+@Component
+public class KafkaStreamsLifecycleController implements StreamLifecycleController {
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaStreamsLifecycleController.class);
+
+    private final StreamsBuilderFactoryBean streamsBuilderFactoryBean;
+    private final AtomicBoolean stoppedByBreaker = new AtomicBoolean(false);
+
+    /** Single-thread executor: serializes stop/start and keeps the blocking close() off any StreamThread. */
+    private final ExecutorService lifecycleExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "cb-stream-lifecycle");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    public KafkaStreamsLifecycleController(@Qualifier("&paymentsStreamsBuilder") StreamsBuilderFactoryBean streamsBuilderFactoryBean) {
+        this.streamsBuilderFactoryBean = streamsBuilderFactoryBean;
+    }
+
+    @Override
+    public void stopStream() {
+        // Flip intent synchronously so isStoppedByBreaker() is correct immediately,
+        // but run the blocking close() off the StreamThread to avoid a self-join deadlock.
+        if (stoppedByBreaker.compareAndSet(false, true)) {
+            lifecycleExecutor.submit(() -> {
+                try {
+                    log.warn("⏸️  Stopping Kafka Streams - circuit breaker OPEN (consumer offline, no fetching, no buffering)");
+                    streamsBuilderFactoryBean.stop();
+                    log.info("✓ Streams stopped successfully");
+                } catch (Exception ex) {
+                    log.error("Error stopping stream — reverting breaker-stop state so it can be retried", ex);
+                    stoppedByBreaker.set(false);
+                }
+            });
+        } else {
+            log.debug("Stream already stopped by breaker — ignoring duplicate stop request");
+        }
+    }
+
+    @Override
+    public void startStream() {
+        if (stoppedByBreaker.compareAndSet(true, false)) {
+            lifecycleExecutor.submit(() -> {
+                try {
+                    log.info("▶️  Starting Kafka Streams - recovery in progress");
+                    streamsBuilderFactoryBean.start();
+                    log.info("✓ Streams started successfully");
+                } catch (Exception ex) {
+                    log.error("Error starting stream — reverting state so recovery can retry", ex);
+                    stoppedByBreaker.set(true);
+                }
+            });
+        } else {
+            log.debug("Stream already running — ignoring duplicate start request");
+        }
+    }
+
+    @Override
+    public boolean isStoppedByBreaker() {
+        return stoppedByBreaker.get();
+    }
+
+    @PreDestroy
+    void shutdown() {
+        lifecycleExecutor.shutdown();
+        try {
+            if (!lifecycleExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                lifecycleExecutor.shutdownNow();
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            lifecycleExecutor.shutdownNow();
+        }
+    }
+}
+```
+
+### What an inline (broken) version looks like — and why it fails
+
+```java
+// ❌ DO NOT DO THIS — runs on the StreamThread → self-join → unclean shutdown
+@Override
+public synchronized void stopStream() {
+    if (stoppedByBreaker.compareAndSet(false, true)) {
+        try {
+            streamsBuilderFactoryBean.stop();          // blocks for full close timeout
+        } catch (Exception ex) {
+            stoppedByBreaker.set(false);
+            throw new IllegalStateException(ex);       // ❌ propagates back onto the StreamThread
+        }
+    }
+}
+```
+
+The two failure modes of the inline version:
+1. **Self-join deadlock.** `close()` waits for all StreamThreads to terminate, but one of those threads *is* the caller → it blocks the full close timeout, then force-terminates.
+2. **Exception propagates onto the StreamThread.** Throwing back from the listener turns a breaker OPEN event into an uncaught exception on the StreamThread, which the Streams uncaught-exception handler then re-classifies (usually as fatal). A breaker trip should never look like a stream crash.
+
+### Retrofit rules (reviewer checklist)
+
+- [ ] `stopStream()` / `startStream()` are **not `synchronized`** — the single-thread executor already serializes them.
+- [ ] Both methods **do not throw** — failures revert the `AtomicBoolean` flag instead, so the recovery scheduler can retry on its next tick.
+- [ ] The executor is a **single-thread daemon executor** (named for log diagnostics, e.g. `cb-stream-lifecycle`). Single-thread guarantees stop/start run in submission order.
+- [ ] The intent flag flips **synchronously** (`compareAndSet` before `submit`) so `isStoppedByBreaker()` is correct the instant the listener returns — the recovery scheduler reads this flag.
+- [ ] `@PreDestroy shutdown()` is present and bounded (e.g. 30s timeout, then `shutdownNow()`) so the executor drains cleanly on pod stop.
+- [ ] No changes are needed in `BusinessOutcomeCircuitBreaker` or `CircuitBreakerRecoveryScheduler` — they call the same `StreamLifecycleController` interface.
 
 ---
 
@@ -144,7 +375,7 @@ src/main/java/com/yourcompany/tradeingestion/
 
 Replace `InputEvent` and `OutputEvent` with your domain models.
 
-**Example for `trade-ingestion-service`:**
+**Example for `trade-processing-service`:**
 
 ```java
 // model/TradeInput.java — YOUR input record from Kafka
@@ -235,7 +466,7 @@ public class TradeRecordProcessorSupplier implements ProcessorSupplier<String, T
 
                     ProcessorContext context = context();
                     ProcessingResult result = businessProcessorService.process(
-                        "trade-ingestion-stream",   // ← change stream name
+                        "trade-processing-stream",   // ← change stream name
                         context.topic(),
                         context.partition(),
                         context.offset(),
@@ -289,7 +520,7 @@ app:
   output:
     topic: trades.processed                        # ← YOUR output topic
   stream:
-    application-id: trade-ingestion-service-v1     # ← YOUR application ID (= consumer group)
+    application-id: trade-processing-service-v1     # ← YOUR application ID (= consumer group)
 ```
 
 ### Step 5: Configure Output Producer (15 minutes)
@@ -485,7 +716,7 @@ app:
 
   # ── Kafka Streams Config ──
   stream:
-    application-id: trade-ingestion-service-v1           # YOUR consumer group
+    application-id: trade-processing-service-v1           # YOUR consumer group
     processing-guarantee: exactly_once_v2                # or at_least_once (see SECTION 6)
     num-stream-threads: 1
     commit-interval-ms: 1000
@@ -499,8 +730,12 @@ app:
     consumer:
       auto-offset-reset: latest
       max-poll-records: 250
-      max-poll-interval-ms: 300000
-      session-timeout-ms: 300000
+      # max-poll-interval-ms MUST be >= session-timeout-ms. Guards the first batch after resume.
+      max-poll-interval-ms: 1800000                      # 30 min
+      # session-timeout-ms = how long partitions stay reserved while the stream is STOPPED.
+      # This is the hard ceiling for a single breaker stop. Broker max (group.max.session.timeout.ms)
+      # is 30 min on Confluent Cloud and cannot be raised. Every restart-delay MUST stay under this.
+      session-timeout-ms: 1800000                        # 30 min (broker ceiling)
       heartbeat-interval-ms: 10000
       request-timeout-ms: 30000
       retry-backoff-ms: 500
@@ -522,7 +757,10 @@ app:
     minimum-number-of-calls: 100                         # Minimum sample size
     permitted-calls-in-half-open-state: 20               # Test records during recovery
     max-wait-in-half-open-state: 2m
-    restart-delays: 1m, 10m, 20m                         # Exponential backoff
+    # Exponential backoff. Each delay MUST be < session-timeout-ms (30 min) or the stop
+    # exceeds the broker ceiling → member evicted → rebalance. Last delay repeats for
+    # subsequent opens, so the breaker loops in ~25m cycles during a long outage.
+    restart-delays: 1m, 5m, 25m
     scheduler-delay-ms: 5000                             # Recovery check interval
 
 # ── PostgreSQL ──
@@ -703,30 +941,83 @@ The circuit breaker monitors the **rate** of these. If > 20% of records go to re
 
 ---
 
+## Optional — `open_count` as a true Micrometer `Counter`
+
+> **Status:** Optional. Apply only if you want breaker-open counts to support `rate()` / `increase()` queries on dashboards. **Not required for alerting** — the `CircuitBreakerFlapping` rule uses `changes(...)[1h]`, which tolerates resets.
+
+### Why
+
+By default, `circuit_breaker_open_count_total` is registered as a **gauge** backed by an in-memory `AtomicInteger`. Two consequences:
+
+- It **resets to 0 on every pod restart** (the `AtomicInteger` is re-created).
+- A `_total` suffix on a gauge is misleading — Prometheus convention reserves `_total` for monotonic counters.
+
+This is **not a correctness bug for alerting**, but it matters if you want accurate `rate(...)` / `increase(...)` queries on dashboards.
+
+### Fix — register a Micrometer `Counter` instead of a gauge
+
+**Before** (in `CircuitBreakerMetrics`):
+
+```java
+private final AtomicInteger openCount = new AtomicInteger(0);
+
+// in registerMetrics():
+meterRegistry.gauge(
+    "circuit_breaker_open_count_total",
+    Tags.of("breaker", "payments-business-soft-failure"),
+    openCount,
+    AtomicInteger::get
+);
+
+public void recordOpenEvent() {
+    openCount.incrementAndGet();
+}
+```
+
+**After:**
+
+```java
+import io.micrometer.core.instrument.Counter;
+
+private final Counter openCounter;
+
+// in the constructor, after meterRegistry is assigned:
+this.openCounter = Counter.builder("circuit_breaker_open_count")   // Micrometer appends _total
+        .tag("breaker", "payments-business-soft-failure")
+        .description("Cumulative number of times the breaker opened")
+        .register(meterRegistry);
+
+// remove the AtomicInteger field and its gauge registration above.
+
+public void recordOpenEvent() {
+    openCounter.increment();
+}
+```
+
+> **Exported name is unchanged.** Micrometer's Prometheus registry automatically appends `_total` to counter names, so the metric is still exported as `circuit_breaker_open_count_total` — the existing `CircuitBreakerFlapping` alert keeps working. The count still resets on pod restart (counters are per-process), but it is now a proper monotonic counter within a pod's lifetime, so `rate()` / `increase()` behave correctly.
+
+### Retrofit checklist
+
+- [ ] Replace the `AtomicInteger` gauge with a `Counter` as shown.
+- [ ] Confirm the exported metric name stays `circuit_breaker_open_count_total` at `/actuator/prometheus`.
+- [ ] No alert-rule change needed.
+- [ ] Optional: switch dashboards from raw value to `increase(circuit_breaker_open_count_total[1h])`.
+
+---
+
 ## Applying to Both Projects
 
-### `trade-ingestion-service` (200ms/trade — Light Processing)
+### `trade-processing-service` (200ms/trade — Light Processing)
 
 | Config | Value | Rationale |
 |--------|-------|-----------|
-| `application-id` | `trade-ingestion-service-v1` | Consumer group identity |
+| `application-id` | `trade-processing-service-v1` | Consumer group identity |
 | `processing-guarantee` | `at_least_once` | DB is the sink → idempotent upserts |
 | `max-poll-records` | `500` | Light processing can handle larger batches |
 | `failure-rate-threshold` | `20` | 20% soft failures → breaker opens |
 | `minimum-number-of-calls` | `100` | Need 100 records to evaluate |
 | `time-window-seconds` | `1800` | 30-min window |
 
-### `trade-consumer-service` (2000ms/trade — Heavy Processing)
-
-| Config | Value | Rationale |
-|--------|-------|-----------|
-| `application-id` | `trade-consumer-service-v1` | Consumer group identity |
-| `processing-guarantee` | `at_least_once` | DB is the sink → idempotent upserts |
-| `max-poll-records` | `50` | Heavy processing — smaller batches to avoid poll timeout |
-| `max-poll-interval-ms` | `600000` (10 min) | 50 records × 2s/record = 100s, but leave headroom |
-| `failure-rate-threshold` | `20` | Same threshold |
-| `minimum-number-of-calls` | `50` | Lower volume → lower minimum |
-| `time-window-seconds` | `3600` | 60-min window (trades arrive slower) |
 
 ---
 
