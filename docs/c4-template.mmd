@@ -1,0 +1,59 @@
+flowchart TB
+
+subgraph "Users"
+    USER[End User]
+end
+
+subgraph "Frontend"
+    UI[React UI]
+end
+
+subgraph "Backend Services"
+    API[API Gateway]
+    SVC1[Domain Service]
+    SVC2[Another Service]
+end
+
+subgraph "Messaging"
+    KAFKA[(Kafka)]
+end
+
+subgraph "Data Stores"
+    DB[(Database)]
+end
+
+USER --> UI
+UI --> API
+API --> SVC1
+SVC1 --> KAFKA
+KAFKA --> SVC2
+SVC2 --> DBflowchart TB
+
+subgraph "Users"
+    USER[End User]c4-template.mmd
+end
+
+subgraph "Frontend"
+    UI[React UI]
+end
+
+subgraph "Backend Services"
+    API[API Gateway]
+    SVC1[Domain Service]
+    SVC2[Another Service]
+end
+
+subgraph "Messaging"
+    KAFKA[(Kafka)]
+end
+
+subgraph "Data Stores"
+    DB[(Database)]
+end
+
+USER --> UI
+UI --> API
+API --> SVC1
+SVC1 --> KAFKA
+KAFKA --> SVC2
+SVC2 --> DB

@@ -387,14 +387,18 @@ These settings are **fully independent** from `processing.guarantee`. Whether yo
 // Static membership: prevents rebalance storms during KEDA scale-up/down.
 // Each pod gets a unique group.instance.id (its hostname), so Kafka recognizes
 // returning pods and skips rebalance if they rejoin within session.timeout.ms.
+// Uses the "consumer." prefix to guarantee forwarding to Kafka Streams' internal main consumer
+// (group.instance.id is a consumer-only config).
 if (groupInstanceId != null && !groupInstanceId.isBlank()) {
-    props.put("group.instance.id", groupInstanceId);
+    props.put("consumer.group.instance.id", groupInstanceId);
 }
 
 // Don't trigger rebalance when consumer shuts down gracefully.
 // Kafka Streams will NOT send a LeaveGroup request, so the coordinator
 // waits session.timeout.ms before reassigning partitions.
-props.put("internal.leave.group.on.close", internalLeaveGroupOnClose);
+// Uses the "consumer." prefix — internal.leave.group.on.close is an internal ConsumerConfig
+// property that may NOT be forwarded from the top level on all Kafka Streams versions.
+props.put("consumer.internal.leave.group.on.close", internalLeaveGroupOnClose);
 ```
 
 ### 7.3 Updated Default Values

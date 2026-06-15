@@ -21,6 +21,34 @@ They are configured independently — different YAML paths, different Java class
 
 ---
 
+## Choosing the Consumption Model — 3 Options
+
+Before settling on Kafka Streams, it's worth understanding the three ways to consume from Kafka and why each fits a different problem. The decisive factor is the relationship between **concurrency** and **partition count**, and whether the work is **stateful**.
+
+| Dimension | Plain Kafka Consumer | **Kafka Streams** (this service) | Confluent Parallel Consumer |
+|-----------|----------------------|----------------------------------|------------------------------|
+| **What it is** | Raw `KafkaConsumer` poll loop you drive yourself | High-level stream-processing framework (DSL + state) | Library wrapping `KafkaConsumer` that decouples fetch from process |
+| **Concurrency ceiling** | = partition count | = partition count (per sub-topology) | **>> partition count** (thread pool) |
+| **Intra-partition key parallelism** | ❌ No (sequential per partition) | ❌ No (sequential per task) | ✅ Yes (`KEY` ordering mode) |
+| **Stateful ops** (joins, windows, aggregations, KTables) | ⚠️ Manual — you build & manage state | ✅ Built-in state stores, changelogs, standby replicas | ❌ None |
+| **Exactly-once (stateful)** | ❌ DIY, very hard | ✅ `processing.guarantee=exactly_once_v2` | ⚠️ EOS on produce, not stateful topologies |
+| **Offset management** | Manual commit logic | Automatic (framework-managed) | Automatic, out-of-order safe |
+| **Ordering** | Per-partition | Per-key / per-partition | Selectable: `UNORDERED` / `KEY` / `PARTITION` |
+| **Best for** | Simple, full-control consume loops | **Stateful transformations & aggregations** | High-latency I/O-bound per-record work |
+| **Scaling lever** | Add partitions | Add partitions / sub-topologies | Raise `maxConcurrency` (no re-partition) |
+
+### When to pick each
+
+| Option | Pick it when… |
+|--------|---------------|
+| **Plain Kafka Consumer** | You need full control of the poll loop, work is simple/stateless, and partition-bound concurrency is enough. |
+| **Kafka Streams** ✅ | You need **stateful** processing — joins, windowed aggregations, deduplication, KTables — with exactly-once. **This is why this service uses it.** |
+| **Confluent Parallel Consumer** | A stage is **I/O-bound per record** (external API / DB / LLM call) and you need concurrency far beyond partition count *without* exploding partitions. Use `KEY` mode for per-key ordering with cross-key parallelism. |
+
+> **Key fact:** Plain Consumer and Kafka Streams are both capped at **partition count** for concurrency — to scale them, add partitions. Only the **Parallel Consumer** breaks that 1:1 coupling, processing more records concurrently than there are partitions. But it gives up state stores and the Streams DSL, so it's a complement to Streams (for stateless, high-latency stages), not a replacement.
+
+---
+
 ## Tech Stack
 
 | Component | Version | Why |
@@ -139,7 +167,7 @@ app:
     topic: payments.output
   stream:
     application-id: payments-stream-v1
-    processing-guarantee: at_least_once
+    processing-guarantee: exactly_once_v2
     num-stream-threads: 1
     commit-interval-ms: 1000
     state-dir: /tmp/kafka-streams
@@ -155,7 +183,7 @@ app:
     consumer:
       auto-offset-reset: latest
       isolation-level: read_committed
-      max-poll-records: 250
+      max-poll-records: 100
       max-poll-interval-ms: 300000
       session-timeout-ms: 300000
       heartbeat-interval-ms: 10000
@@ -179,7 +207,7 @@ app:
 | Property | Value | Why |
 |----------|-------|-----|
 | `application-id` | `payments-stream-v1` | Consumer group ID for Kafka Streams. All pods with the same ID share partitions. Append version suffix (`-v1`) to force fresh offsets during schema/topology changes |
-| `processing-guarantee` | `at_least_once` | Offsets are committed periodically after processing. If the app crashes or rebalances before the next commit, the same input records can be replayed. Use idempotent downstream handling or dedupe keys for financial data |
+| `processing-guarantee` | `exactly_once_v2` | Streams' internal producer wraps poll → process → ctx.forward → offset-commit in a single Kafka transaction. With the topology terminating in `.to(outputTopic)`, a rebalance mid-batch aborts the transaction and downstream `read_committed` consumers never see the in-flight writes. This is what makes 2 → 4 → 6 pod KEDA scale-ups duplicate-free. Requires: the processor uses `ctx.forward(...)` (never an external `KafkaTemplate` for the output topic) |
 | `num-stream-threads` | `1` | One stream thread per pod. KEDA scales pods horizontally, not threads. More threads per pod = more rebalance complexity for no benefit |
 | `commit-interval-ms` | `1000` | Offset commit frequency. Lower = less re-processing on crash. Higher = better throughput. 1s is ideal for financial data |
 | `state-dir` | `/tmp/kafka-streams` | Kafka Streams creates subdirs per `application.id`. In K8s, `emptyDir` is mounted here because `readOnlyRootFilesystem: true` blocks `/tmp` writes |
@@ -222,8 +250,8 @@ These properties configure the Kafka Streams **internal consumer** that reads fr
 | Property | Value | Why |
 |----------|-------|-----|
 | `auto-offset-reset` | `latest` | When the consumer group has no committed offset (first join or reset), start from the latest message. Don't replay historical data. Use `earliest` only if you need full replay on fresh deployment |
-| `isolation-level` | `read_committed` | If upstream producers use Kafka transactions, hide aborted writes so the stream does not process records that were never committed. This does **not** stop replay duplicates from `at_least_once`; it only filters aborted transactional input |
-| `max-poll-records` | `250` | Max records returned per `poll()` call. 250 keeps processing loops responsive and gives meaningful progress between commits. Too high = long processing gaps between heartbeats |
+| `isolation-level` | `read_committed` | Hides aborted transactional writes so a rebalanced consumer never re-reads records from an aborted upstream transaction. **Required under EOS** — without it, the duplicate-prevention guarantee of `exactly_once_v2` is silently broken. Also hides aborted writes from any upstream transactional producers |
+| `max-poll-records` | `100` | Max records returned per `poll()` call. Under EOS each poll becomes one Kafka transaction, so a smaller batch shrinks the window of work re-executed if a rebalance fires mid-batch. 100 balances throughput against rebalance blast radius |
 | `max-poll-interval-ms` | `300000` (5 min) | Max time between `poll()` calls before Kafka kicks the consumer from the group. Must be greater than the longest possible batch processing time. 5 min matches `session-timeout-ms` for consistent behavior |
 | `session-timeout-ms` | `300000` (5 min) | How long Kafka waits without a heartbeat before declaring the consumer dead. Coordinated with KEDA cooldown — prevents premature rebalance during scale events |
 | `heartbeat-interval-ms` | `10000` (10 sec) | How often the consumer sends "I'm alive" to the group coordinator. **Rule: must be < `session-timeout-ms` / 3.** 10s < 100s ✓ — gives 30 heartbeat opportunities per session window |
@@ -236,7 +264,7 @@ These properties configure the Kafka Streams **internal consumer** that reads fr
 
 ## 1.5 Internal Producer Overrides — Explained
 
-Kafka Streams has an **internal producer** for repartition/changelog/output work inside the topology. With `at_least_once`, it is a normal producer, not a transactional exactly-once boundary. These overrides tune that internal producer:
+Kafka Streams has an **internal producer** for repartition/changelog/output work inside the topology. Under `exactly_once_v2`, it runs as a transactional producer so the input-offset commit and downstream writes share one Kafka transaction. These overrides tune that internal producer:
 
 | Property | Value | Why |
 |----------|-------|-----|
@@ -262,7 +290,7 @@ public class KafkaStreamsConfig {
     public KafkaStreamsConfiguration paymentsStreamsConfiguration(
             @Value("${spring.kafka.bootstrap-servers:localhost:9092}") String bootstrapServers,
             @Value("${app.stream.application-id:payments-stream-v1}") String applicationId,
-            @Value("${app.stream.processing-guarantee:at_least_once}") String processingGuarantee,
+            @Value("${app.stream.processing-guarantee:exactly_once_v2}") String processingGuarantee,
             @Value("${app.stream.num-stream-threads:1}") int numStreamThreads,
             @Value("${app.stream.commit-interval-ms:1000}") int commitIntervalMs,
             @Value("${app.stream.state-dir:/tmp/kafka-streams}") String stateDir,
@@ -272,7 +300,7 @@ public class KafkaStreamsConfig {
             @Value("${app.stream.group-instance-id:#{null}}") String groupInstanceId,
             @Value("${app.stream.internal-leave-group-on-close:false}") boolean internalLeaveGroupOnClose,
             @Value("${app.stream.consumer.auto-offset-reset:latest}") String autoOffsetReset,
-            @Value("${app.stream.consumer.max-poll-records:250}") int maxPollRecords,
+            @Value("${app.stream.consumer.max-poll-records:100}") int maxPollRecords,
             @Value("${app.stream.consumer.max-poll-interval-ms:300000}") int maxPollIntervalMs,
             @Value("${app.stream.consumer.session-timeout-ms:300000}") int sessionTimeoutMs,
             @Value("${app.stream.consumer.heartbeat-interval-ms:10000}") int heartbeatIntervalMs,
@@ -301,10 +329,14 @@ public class KafkaStreamsConfig {
                 CustomDeserializationExceptionHandler.class);
 
         // --- Static Membership ---
+        // Use the "consumer." prefix so Kafka Streams forwards these keys to the
+        // internal main consumer. internal.leave.group.on.close and group.instance.id
+        // are consumer-only configs and may NOT be picked up from the top level on all
+        // Kafka Streams versions.
         if (groupInstanceId != null && !groupInstanceId.isBlank()) {
-            props.put("group.instance.id", groupInstanceId);
+            props.put("consumer.group.instance.id", groupInstanceId);
         }
-        props.put("internal.leave.group.on.close", internalLeaveGroupOnClose);
+        props.put("consumer.internal.leave.group.on.close", internalLeaveGroupOnClose);
 
         // --- Consumer Overrides ---
         props.put("main.consumer.auto.offset.reset", autoOffsetReset);
@@ -339,11 +371,19 @@ public class KafkaStreamsConfig {
     public KStream<String, InputEvent> paymentsStream(
             StreamsBuilder streamsBuilder,
             PaymentsRecordProcessorSupplier processorSupplier,
-            @Value("${app.input.topic:payments.input}") String inputTopic) {
+            @Value("${app.input.topic:payments.input}") String inputTopic,
+            @Value("${app.output.topic:payments.output}") String outputTopic) {
         JsonSerde<InputEvent> inputSerde = new JsonSerde<>(InputEvent.class);
+        JsonSerde<OutputEvent> outputSerde = new JsonSerde<>(OutputEvent.class);
         KStream<String, InputEvent> stream = streamsBuilder.stream(
                 inputTopic, Consumed.with(Serdes.String(), inputSerde));
-        stream.process(processorSupplier::get);
+        // .process(...).to(...) keeps the input-offset commit and the output write inside
+        // a single Kafka transaction under processing.guarantee=exactly_once_v2.
+        // The processor must use ctx.forward(record.withValue(output)) when it has
+        // something to publish — NEVER call an external KafkaTemplate from inside the
+        // processor, that re-introduces dual-producer duplicates on rebalance.
+        stream.process(processorSupplier)
+              .to(outputTopic, Produced.with(Serdes.String(), outputSerde));
         return stream;
     }
 }
@@ -359,7 +399,7 @@ payments.input (48 partitions)
         ▼
 ┌──────────────────────────┐
 │  Kafka Streams Consumer  │  ← auto-offset-reset: latest
-│  (internal, managed)     │  ← max-poll-records: 250
+│  (internal, managed)     │  ← max-poll-records: 100
 │                          │  ← session-timeout: 5 min
 │  Deserialization ────────│──→ Bad data? → CONTINUE (log + audit)
 │                          │
@@ -688,7 +728,7 @@ public class FinancialStreamApplication {
 
 ## Key Design Decisions Summary
 
-> **Current project default:** `processing-guarantee=at_least_once`. If any older row below still mentions `exactly_once_v2`, treat it as historical guidance rather than the active runtime setting.
+> **Current project default:** `processing-guarantee=exactly_once_v2` (changed from `at_least_once` after a duplicate-on-scale incident — see `docs/DUPLICATE_FIX_2026-06-14.md`). The historical at-least-once guidance below is retained because it is still a valid choice for **Kafka → idempotent-DB** topologies where EOS adds 2-5x cost without benefit. For **Kafka → Kafka** (this template's default), EOS is required to prevent duplicates on KEDA scale events.
 
 | Decision | Choice | Why |
 |----------|--------|-----|
@@ -913,7 +953,7 @@ context.forward(new Record<>(key, outputEvent, context.currentSystemTimeMs()));
 
 With a sink in your topology:
 ```java
-stream.process(processorSupplier::get)
+stream.process(processorSupplier)
       .to("payments.output", Produced.with(Serdes.String(), outputSerde));
 ```
 

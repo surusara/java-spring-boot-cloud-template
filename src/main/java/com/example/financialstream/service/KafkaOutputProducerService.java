@@ -12,14 +12,18 @@ import java.util.concurrent.TimeUnit;
 /**
  * Transactional Kafka producer service.
  *
- * Each send() call executes inside a Kafka transaction:
- *   1. beginTransaction()
- *   2. send() the output record
- *   3. commitTransaction() on success / abortTransaction() on failure
+ * <p>Each {@link #send(OutputEvent)} call executes inside its own Kafka transaction
+ * (init/begin/commit/abort) via {@link KafkaTemplate#executeInTransaction}.
+ * Downstream consumers MUST use {@code isolation.level=read_committed} to only see
+ * committed records.
  *
- * Downstream consumers MUST use isolation.level=read_committed to only see committed records.
+ * <p><b>Not for use from the Kafka Streams processor.</b> Forward downstream records
+ * via {@code ProcessorContext.forward(...)} so they share Streams' transaction.
+ * See {@link OutputProducerService} javadoc for the duplicate-on-rebalance failure
+ * mode this avoids.
  */
 @Service
+@SuppressWarnings("deprecation") // implements deprecated interface intentionally; out-of-stream callers may still use it
 public class KafkaOutputProducerService implements OutputProducerService {
 
     private static final Logger log = LoggerFactory.getLogger(KafkaOutputProducerService.class);

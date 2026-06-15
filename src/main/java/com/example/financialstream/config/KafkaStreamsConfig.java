@@ -5,11 +5,13 @@ import com.example.financialstream.kafka.CustomDeserializationExceptionHandler;
 import com.example.financialstream.kafka.PaymentsRecordProcessorSupplier;
 import com.example.financialstream.kafka.StreamFatalExceptionHandler;
 import com.example.financialstream.model.InputEvent;
+import com.example.financialstream.model.OutputEvent;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.Produced;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -26,32 +28,52 @@ import java.util.Map;
 @EnableConfigurationProperties(BreakerControlProperties.class)
 public class KafkaStreamsConfig {
 
-    static final String[] FORBIDDEN_UPGRADE_FROM_PROPERTIES = {
-            "upgrade.from",
-            "spring.kafka.streams.properties.upgrade.from",
-            "app.stream.upgrade-from",
-            "app.stream.upgrade.from"
-    };
+    /**
+     * Fail-fast guard against a legacy compatibility flag that silently disables
+     * cooperative rebalancing.
+     *
+     * <p>Setting {@code spring.kafka.streams.properties.upgrade.from=2.3} (or 2.4) forces
+     * the eager rebalance protocol on a 3.x client. Under eager rebalancing, EVERY pod
+     * revokes ALL partitions on each membership change \u2014 which during a KEDA scale-up
+     * (2 \u2192 4 \u2192 6 pods) means every running task is interrupted mid-batch and the
+     * partitions are reassigned from scratch. Combined with at-least-once + an
+     * external producer, this is exactly the pattern that produces near-100% duplicate
+     * output. Cooperative rebalancing only revokes the partitions being moved.
+     *
+     * <p>This guard runs at startup so the misconfiguration surfaces immediately
+     * instead of as a duplicates incident in production.
+     */
+    public static void validateCooperativeRebalancingConfig(Environment environment) {
+        String upgradeFrom = environment.getProperty("spring.kafka.streams.properties.upgrade.from");
+        if (upgradeFrom != null && !upgradeFrom.isBlank()) {
+            throw new IllegalStateException(
+                    "spring.kafka.streams.properties.upgrade.from=" + upgradeFrom
+                            + " forces the eager rebalance protocol and disables cooperative rebalancing. "
+                            + "This causes rebalance storms (and duplicates) on every scale event. "
+                            + "Remove the property unless you are mid-upgrade from Kafka Streams 2.3/2.4.");
+        }
+    }
 
     @Bean(name = "paymentsStreamsConfiguration")
     public KafkaStreamsConfiguration paymentsStreamsConfiguration(
-            Environment environment,
             @Value("${spring.kafka.bootstrap-servers:localhost:9092}") String bootstrapServers,
             @Value("${app.stream.application-id:payments-stream-v1}") String applicationId,
-            @Value("${app.stream.processing-guarantee:at_least_once}") String processingGuarantee,
+            @Value("${app.stream.processing-guarantee:exactly_once_v2}") String processingGuarantee,
             @Value("${app.stream.num-stream-threads:1}") int numStreamThreads,
             @Value("${app.stream.commit-interval-ms:1000}") int commitIntervalMs,
             @Value("${app.stream.state-dir:/tmp/kafka-streams}") String stateDir,
             @Value("${app.stream.replication-factor:3}") int replicationFactor,
             @Value("${app.stream.num-standby-replicas:0}") int numStandbyReplicas,
-            @Value("${app.stream.max-task-idle-ms:0}") long maxTaskIdleMs,
+            @Value("${app.stream.max-task-idle-ms:1000}") long maxTaskIdleMs,
             // Static membership: pod hostname as member ID. Prevents rebalance storms during KEDA scaling.
             @Value("${app.stream.group-instance-id:#{null}}") String groupInstanceId,
             // Don't trigger rebalance on graceful close. Combined with session-timeout-ms, KEDA can remove pods safely.
             @Value("${app.stream.internal-leave-group-on-close:false}") boolean internalLeaveGroupOnClose,
             @Value("${app.stream.consumer.auto-offset-reset:latest}") String autoOffsetReset,
+            // Hides aborted transactional writes from upstream producers. Required under EOS so a re-read
+            // after a rebalance does not see records from aborted transactions.
             @Value("${app.stream.consumer.isolation-level:read_committed}") String consumerIsolationLevel,
-            @Value("${app.stream.consumer.max-poll-records:250}") int maxPollRecords,
+            @Value("${app.stream.consumer.max-poll-records:100}") int maxPollRecords,
             // 12 min: must be >= session-timeout-ms. Covers max circuit breaker delay (10m) + 2m buffer.
             @Value("${app.stream.consumer.max-poll-interval-ms:720000}") int maxPollIntervalMs,
             // 12 min: covers max circuit breaker restart delay (10m) + 2m buffer.
@@ -73,8 +95,6 @@ public class KafkaStreamsConfig {
             @Value("${app.stream.security.protocol:#{null}}") String securityProtocol,
             @Value("${app.stream.sasl.mechanism:#{null}}") String saslMechanism,
             @Value("${app.stream.sasl.jaas.config:#{null}}") String saslJaasConfig) {
-
-        validateCooperativeRebalancingConfig(environment);
 
         Map<String, Object> props = new HashMap<>();
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
@@ -108,6 +128,9 @@ public class KafkaStreamsConfig {
         props.put("consumer.internal.leave.group.on.close", internalLeaveGroupOnClose);
 
         props.put("main.consumer.auto.offset.reset", autoOffsetReset);
+        // isolation.level applies to all internal consumers (main, restore, global).
+        // "read_committed" is mandatory under EOS so a rebalanced consumer never re-reads
+        // records from an aborted transaction.
         props.put("consumer.isolation.level", consumerIsolationLevel);
         props.put("consumer.max.poll.records", maxPollRecords);
         props.put("consumer.max.poll.interval.ms", maxPollIntervalMs);
@@ -148,20 +171,6 @@ public class KafkaStreamsConfig {
         return new KafkaStreamsConfiguration(props);
     }
 
-    static void validateCooperativeRebalancingConfig(Environment environment) {
-        for (String propertyName : FORBIDDEN_UPGRADE_FROM_PROPERTIES) {
-            String value = environment.getProperty(propertyName);
-            if (value != null && !value.isBlank()) {
-                throw new IllegalStateException(
-                        "Kafka Streams cooperative rebalancing is enforced in this service. "
-                                + "Remove '" + propertyName + "=" + value + "'. "
-                                + "'upgrade.from' is only a temporary compatibility flag during a version upgrade; "
-                                + "keeping it set can downgrade Kafka Streams back to the older eager rebalance path."
-                );
-            }
-        }
-    }
-
     @Bean(name = "paymentsStreamsBuilder")
     public StreamsBuilderFactoryBean paymentsStreamsBuilder(KafkaStreamsConfiguration kafkaStreamsConfiguration,
                                                             StreamFatalExceptionHandler uncaughtExceptionHandler) {
@@ -173,10 +182,18 @@ public class KafkaStreamsConfig {
     @Bean
     public KStream<String, InputEvent> paymentsStream(StreamsBuilder streamsBuilder,
                                                       PaymentsRecordProcessorSupplier processorSupplier,
-                                                      @Value("${app.input.topic:payments.input}") String inputTopic) {
+                                                      @Value("${app.input.topic:payments.input}") String inputTopic,
+                                                      @Value("${app.output.topic:payments.output}") String outputTopic) {
         JsonSerde<InputEvent> inputSerde = new JsonSerde<>(InputEvent.class);
+        JsonSerde<OutputEvent> outputSerde = new JsonSerde<>(OutputEvent.class);
         KStream<String, InputEvent> stream = streamsBuilder.stream(inputTopic, Consumed.with(Serdes.String(), inputSerde));
-        stream.process(processorSupplier::get);
+        // .process(...).to(...) terminates the topology with Kafka Streams' own producer.
+        // Under processing.guarantee=exactly_once_v2 the input-offset commit and the output
+        // write share a single transaction, so a rebalance mid-batch cannot produce duplicate
+        // output records. Do NOT publish to the output topic via an external KafkaTemplate
+        // from inside the processor — that would re-introduce dual-producer duplicates.
+        stream.process(processorSupplier)
+              .to(outputTopic, Produced.with(Serdes.String(), outputSerde));
         return stream;
     }
 }

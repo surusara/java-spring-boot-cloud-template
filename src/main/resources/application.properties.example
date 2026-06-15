@@ -38,7 +38,10 @@ app.output.topic=payments.output
 
 # --- Streams core ---
 app.stream.application-id=payments-stream-v1
-app.stream.processing-guarantee=at_least_once
+# exactly_once_v2: Streams' own producer wraps poll → process → ctx.forward →
+# offset-commit in one Kafka transaction. Requires the processor to use
+# ctx.forward and the topology to terminate with .to(outputTopic).
+app.stream.processing-guarantee=exactly_once_v2
 app.stream.num-stream-threads=1
 app.stream.commit-interval-ms=1000
 # State dir still required by Kafka Streams for task metadata, even without stateful features.
@@ -56,9 +59,10 @@ app.stream.internal-leave-group-on-close=false
 
 # --- Streams consumer overrides ---
 app.stream.consumer.auto-offset-reset=latest
-# Hide aborted transactional writes from upstream producers. No effect if source writers are non-transactional.
+# Required under EOS: hide aborted transactional writes.
 app.stream.consumer.isolation-level=read_committed
-app.stream.consumer.max-poll-records=250
+# Smaller batches → smaller uncommitted window on rebalance.
+app.stream.consumer.max-poll-records=100
 # Max time between poll() calls. 5 min matches session-timeout-ms.
 app.stream.consumer.max-poll-interval-ms=300000
 # How long Kafka waits with no heartbeat before declaring dead. 5 min for KEDA scaling tolerance.

@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Trade Journey Tracer</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    :root {
+      --bg: #0b1120;
+      --panel: #131c31;
+      --panel-2: #0f172a;
+      --border: #25304a;
+      --muted: #64748b;
+      --text: #e2e8f0;
+      --cyan: #22d3ee;
+      --teal: #2dd4bf;
+      --green: #34d399;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --violet: #a78bfa;
+    }
+
+    * { box-sizing: border-box; font-family: 'Inter', sans-serif; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(1200px 600px at 50% -10%, #16223d 0%, var(--bg) 55%);
+      min-height: 100vh; color: var(--text); padding: 1.25rem;
+    }
+
+    .wrap { max-width: 1180px; margin: 0 auto; }
+
+    /* ---------- Header ---------- */
+    .header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.25rem; }
+    .title { font-size: 1.7rem; font-weight: 800; letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.6rem; }
+    .title .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 12px var(--cyan); animation: livedot 1.6s infinite; }
+    @keyframes livedot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    .subtitle { color: var(--muted); font-size: 0.88rem; margin-top: 4px; }
+    .legend { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.72rem; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+    /* ---------- Control bar ---------- */
+    .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 0.9rem 1rem; margin-bottom: 1.5rem; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+    .input, .select {
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+      border-radius: 10px; padding: 0.6rem 0.8rem; font-size: 0.85rem; outline: none; transition: border-color .2s, box-shadow .2s;
+    }
+    .input { font-family: 'JetBrains Mono', monospace; min-width: 200px; }
+    .input:focus, .select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(34,211,238,0.12); }
+    .grow { flex: 1; min-width: 180px; }
+
+    .btn { border: none; cursor: pointer; border-radius: 10px; font-weight: 700; font-size: 0.85rem; padding: 0.65rem 1.4rem; transition: all .2s; display: inline-flex; align-items: center; gap: 8px; }
+    .btn:active { transform: scale(0.97); }
+    .btn-trace { background: linear-gradient(135deg, var(--teal), #0e7490); color: #fff; box-shadow: 0 6px 18px rgba(13,148,136,.35); }
+    .btn-trace:hover:not(:disabled) { filter: brightness(1.1); box-shadow: 0 8px 26px rgba(13,148,136,.5); }
+    .btn-trace:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-reset { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-reset:hover { background: var(--panel-2); color: var(--text); }
+
+    /* ---------- Pipeline ---------- */
+    .stage { background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 2rem 1.5rem 1.5rem; position: relative; overflow: hidden; }
+    .stage::before { content:''; position:absolute; inset:0; background: radial-gradient(600px 200px at var(--gx,50%) 0%, rgba(34,211,238,0.06), transparent 70%); pointer-events:none; transition: background .4s; }
+
+    .pipeline { display: flex; align-items: flex-start; gap: 0; overflow-x: auto; padding: 1rem 0.5rem 0.5rem; scrollbar-width: thin; }
+    .pipeline::-webkit-scrollbar { height: 6px; }
+    .pipeline::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .node { position: relative; display: flex; flex-direction: column; align-items: center; min-width: 96px; flex-shrink: 0; }
+    .orb-wrap { position: relative; width: 64px; height: 64px; display:flex; align-items:center; justify-content:center; }
+    .orb {
+      width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 1.35rem; background: var(--panel-2); border: 2px solid var(--border);
+      color: var(--muted); transition: all .45s cubic-bezier(.34,1.56,.64,1); position: relative; z-index: 2;
+    }
+    .node .icon { font-size: 1.4rem; line-height: 1; }
+    .node .num { position:absolute; top:-6px; right:-6px; width:20px; height:20px; border-radius:50%; background:var(--panel); border:1px solid var(--border); font-size:0.62rem; display:flex; align-items:center; justify-content:center; color:var(--muted); z-index:3; }
+
+    /* states */
+    .node.processing .orb { border-color: var(--cyan); color: var(--cyan); background: #0e2a33; box-shadow: 0 0 0 4px rgba(34,211,238,.14), 0 0 26px rgba(34,211,238,.4); animation: pulseGlow 1.2s ease-in-out infinite; }
+    @keyframes pulseGlow { 0%,100% { box-shadow: 0 0 0 4px rgba(34,211,238,.14), 0 0 22px rgba(34,211,238,.35); transform: scale(1.05);} 50% { box-shadow: 0 0 0 10px rgba(34,211,238,.05), 0 0 40px rgba(34,211,238,.55); transform: scale(1.12);} }
+    .node.success .orb { border-color: var(--teal); color: #fff; background: linear-gradient(135deg, #0d9488, #115e59); box-shadow: 0 0 0 3px rgba(45,212,191,.16), 0 0 18px rgba(45,212,191,.35); }
+    .node.error .orb { border-color: var(--red); color: #fff; background: linear-gradient(135deg, #b91c1c, #7f1d1d); box-shadow: 0 0 0 4px rgba(248,113,113,.18), 0 0 26px rgba(248,113,113,.5); animation: shake .5s ease; }
+    @keyframes shake { 10%,90%{transform:translateX(-2px);} 20%,80%{transform:translateX(3px);} 30%,50%,70%{transform:translateX(-5px);} 40%,60%{transform:translateX(5px);} }
+
+    .ring { position:absolute; inset:0; border-radius:50%; border:2px solid var(--cyan); opacity:0; z-index:1; }
+    .node.processing .ring { animation: ripple 1.4s ease-out infinite; }
+    @keyframes ripple { 0% { transform: scale(0.9); opacity:.6; } 100% { transform: scale(1.8); opacity:0; } }
+
+    .label { margin-top: 0.7rem; font-size: 0.74rem; font-weight: 600; text-align: center; color: var(--muted); transition: color .3s; line-height: 1.25; max-width: 90px; }
+    .node.processing .label { color: var(--cyan); }
+    .node.success .label { color: var(--teal); }
+    .node.error .label { color: var(--red); }
+    .svc { font-size: 0.6rem; color: #475569; margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+    .latency { font-size: 0.6rem; margin-top: 3px; color: #475569; font-family: 'JetBrains Mono', monospace; min-height: 12px; }
+    .node.success .latency { color: var(--teal); }
+    .node.error .latency { color: var(--red); }
+
+    /* connector pipe */
+    .pipe { position: relative; height: 6px; flex: 1; min-width: 28px; background: var(--border); border-radius: 3px; margin-top: 29px; overflow: hidden; }
+    .pipe .fill { position: absolute; inset: 0; width: 0%; background: linear-gradient(90deg, var(--teal), var(--cyan)); border-radius: 3px; transition: width .5s ease; }
+    .pipe.flowing .fill { width: 100%; }
+    .pipe.flowing::after {
+      content:''; position:absolute; top:0; left:0; height:100%; width:100%;
+      background: repeating-linear-gradient(90deg, transparent 0 8px, rgba(255,255,255,.55) 8px 14px);
+      animation: dash .6s linear infinite; opacity:.8;
+    }
+    @keyframes dash { to { transform: translateX(14px); } }
+    .pipe.done .fill { width:100%; background: var(--teal); }
+    .pipe.failed .fill { width:100%; background: var(--red); }
+
+    /* traveling tracer packet */
+    .tracer { position:absolute; top:50%; width:14px; height:14px; border-radius:50%; background: #fff; box-shadow:0 0 12px 4px var(--cyan); transform: translate(-50%,-50%); z-index:5; opacity:0; transition: left .45s cubic-bezier(.45,0,.55,1), top .45s cubic-bezier(.45,0,.55,1), opacity .2s; pointer-events:none; }
+
+    /* ---------- Bottom grid ---------- */
+    .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.25rem; margin-top: 1.5rem; }
+    @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 1.1rem 1.2rem; }
+    .card h3 { margin: 0 0 0.8rem; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); display:flex; align-items:center; gap:8px; }
+    .card h3 .live { width:8px;height:8px;border-radius:50%;background:var(--red); box-shadow:0 0 8px var(--red); animation: livedot 1.2s infinite; }
+
+    .log { font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; max-height: 280px; overflow-y: auto; display:flex; flex-direction:column; gap: 6px; scrollbar-width: thin; }
+    .log::-webkit-scrollbar { width:6px; } .log::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+    .logline { display:flex; gap:8px; align-items:flex-start; padding:7px 9px; border-radius:8px; background: var(--panel-2); border-left:3px solid var(--border); animation: slideUp .35s ease; }
+    @keyframes slideUp { from { opacity:0; transform: translateY(6px);} to {opacity:1; transform:none;} }
+    .logline .t { color:#475569; flex-shrink:0; }
+    .logline.ok { border-left-color: var(--teal); }
+    .logline.ok .msg { color: var(--text); }
+    .logline.info { border-left-color: var(--cyan); }
+    .logline.info .msg { color: #cbd5e1; }
+    .logline.err { border-left-color: var(--red); background: #2a1212; }
+    .logline.err .msg { color: var(--red); }
+    .logline .msg b { color: var(--cyan); }
+
+    .summary { display:flex; flex-direction:column; gap: 0.7rem; }
+    .stat { display:flex; justify-content:space-between; align-items:center; padding:0.7rem 0.9rem; background: var(--panel-2); border:1px solid var(--border); border-radius:10px; }
+    .stat .k { color: var(--muted); font-size:0.78rem; }
+    .stat .v { font-weight:700; font-size:0.95rem; font-family:'JetBrains Mono', monospace; }
+    .badge { padding:3px 10px; border-radius:999px; font-size:0.72rem; font-weight:700; }
+    .badge.idle { background:#1e293b; color:var(--muted); }
+    .badge.run { background:#0e2a33; color:var(--cyan); }
+    .badge.done { background:#0f2e2a; color:var(--teal); }
+    .badge.fail { background:#2a1212; color:var(--red); }
+
+    .empty { color:#475569; font-size:0.82rem; text-align:center; padding:1.5rem 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <div class="title"><span class="dot"></span> Live Trade Journey Tracer</div>
+      <div class="subtitle">Enter a Trade ID and watch the trace flow across microservices in real time</div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#64748b"></i> Pending</span>
+      <span><i style="background:#22d3ee"></i> Processing</span>
+      <span><i style="background:#2dd4bf"></i> Success</span>
+      <span><i style="background:#f87171"></i> Exception</span>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="field grow">
+      <label for="tradeId">Trade ID</label>
+      <input id="tradeId" class="input grow" value="TRD-9F3A21" placeholder="e.g. TRD-9F3A21" />
+    </div>
+    <div class="field">
+      <label for="inject">Inject Exception At</label>
+      <select id="inject" class="select">
+        <option value="-1">None (happy path)</option>
+        <option value="0">Step 1 &middot; Trade Received</option>
+        <option value="1">Step 2 &middot; Validation</option>
+        <option value="2">Step 3 &middot; Enrichment</option>
+        <option value="3">Step 4 &middot; Event Published</option>
+        <option value="4">Step 5 &middot; Trade Consumer</option>
+        <option value="5">Step 6 &middot; Settlement Order</option>
+        <option value="6">Step 7 &middot; Clearing &amp; Netting</option>
+        <option value="7">Step 8 &middot; Funding</option>
+        <option value="8">Step 9 &middot; Accounting</option>
+        <option value="9">Step 10 &middot; Payment</option>
+        <option value="random">Random</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="speed">Speed</label>
+      <select id="speed" class="select">
+        <option value="1400">Slow</option>
+        <option value="850" selected>Normal</option>
+        <option value="450">Fast</option>
+      </select>
+    </div>
+    <button id="traceBtn" class="btn btn-trace" onclick="startTrace()">&#9889; Trace</button>
+    <button class="btn btn-reset" onclick="resetTrace()">&#8635; Reset</button>
+  </div>
+
+  <!-- Pipeline stage -->
+  <div class="stage" id="stage">
+    <div class="tracer" id="tracer"></div>
+    <div class="pipeline" id="pipeline"><!-- nodes injected by JS --></div>
+  </div>
+
+  <!-- Bottom -->
+  <div class="grid">
+    <div class="card">
+      <h3><span class="live"></span> Live Event Stream</h3>
+      <div class="log" id="log">
+        <div class="empty">Awaiting trace&hellip; press <b>Trace</b> to begin streaming events.</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Trace Summary</h3>
+      <div class="summary">
+        <div class="stat"><span class="k">Status</span><span class="badge idle" id="sStatus">Idle</span></div>
+        <div class="stat"><span class="k">Trade ID</span><span class="v" id="sTrade">&mdash;</span></div>
+        <div class="stat"><span class="k">Steps Completed</span><span class="v" id="sSteps">0 / 10</span></div>
+        <div class="stat"><span class="k">Elapsed</span><span class="v" id="sElapsed">0 ms</span></div>
+        <div class="stat"><span class="k">Failed Stage</span><span class="v" id="sFail" style="color:#f87171">&mdash;</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   Trade journey definition — mirrors the architecture doc.
+   In production each "step" maps to a real microservice call:
+   GET /api/traces/trades/{tradeId} streams node updates (WebSocket).
+   Here we SIMULATE that stream so the UI is fully self-contained.
+   To wire a real backend: replace the setTimeout in step() with a
+   WebSocket onmessage handler that flips node states from events.
+   ============================================================ */
+const STEPS = [
+  { icon: '\uD83D\uDCE5', label: 'Trade Received',   svc: 'trade-gateway',   ok: 'Trade {id} received from OMS' },
+  { icon: '\uD83D\uDD0D', label: 'Validation',       svc: 'trade-validator', ok: 'Trade {id} validated — fields OK' },
+  { icon: '\uD83E\uDDE9', label: 'Enrichment',       svc: 'ref-data-svc',    ok: 'Reference data enriched' },
+  { icon: '\uD83D\uDCE1', label: 'Event Published',  svc: 'trade-producer',  ok: 'TradeEvent published to Kafka' },
+  { icon: '\uD83D\uDD04', label: 'Trade Consumer',   svc: 'trade-consumer',  ok: 'Event consumed & persisted' },
+  { icon: '\uD83D\uDCDD', label: 'Settlement Order', svc: 'settlement-svc',  ok: 'Settlement order SO-{so} created' },
+  { icon: '\u2696\uFE0F', label: 'Clearing & Net',   svc: 'clearing-svc',    ok: 'Cleared & netted with CCP' },
+  { icon: '\uD83D\uDCB0', label: 'Funding',          svc: 'funding-svc',     ok: 'Funding reserved & confirmed' },
+  { icon: '\uD83D\uDCCA', label: 'Accounting',       svc: 'ledger-svc',      ok: 'Ledger entries posted' },
+  { icon: '\u2705',       label: 'Payment',          svc: 'payment-svc',     ok: 'Payment {pay} settled — DONE' },
+];
+
+const ERRORS = [
+  'Schema validation failed: missing settlementDate',
+  'Downstream timeout calling reference-data-svc',
+  'Kafka broker unavailable — publish rejected',
+  'Consumer lag exceeded — poison message detected',
+  'Settlement order rejected by CCP',
+  'Insufficient funding balance for trade',
+  'Ledger posting conflict — optimistic lock',
+  'Payment gateway returned 503 Service Unavailable',
+];
+
+let pipelineEl, logEl, tracerEl, stageEl;
+let running = false;
+let timers = [];
+
+function buildPipeline() {
+  pipelineEl.innerHTML = '';
+  STEPS.forEach((s, i) => {
+    const node = document.createElement('div');
+    node.className = 'node';
+    node.id = 'node' + i;
+    node.innerHTML =
+      '<div class="orb-wrap">' +
+        '<div class="ring"></div>' +
+        '<div class="orb"><span class="icon">' + s.icon + '</span><span class="num">' + (i+1) + '</span></div>' +
+      '</div>' +
+      '<div class="label">' + s.label + '</div>' +
+      '<div class="svc">' + s.svc + '</div>' +
+      '<div class="latency" id="lat' + i + '"></div>';
+    pipelineEl.appendChild(node);
+
+    if (i < STEPS.length - 1) {
+      const pipe = document.createElement('div');
+      pipe.className = 'pipe';
+      pipe.id = 'pipe' + i;
+      pipe.innerHTML = '<div class="fill"></div>';
+      pipelineEl.appendChild(pipe);
+    }
+  });
+}
+
+function ts() {
+  const d = new Date();
+  return d.toTimeString().slice(0,8) + '.' + String(d.getMilliseconds()).padStart(3,'0');
+}
+
+function log(msg, type) {
+  type = type || 'info';
+  const empty = logEl.querySelector('.empty');
+  if (empty) empty.remove();
+  const line = document.createElement('div');
+  line.className = 'logline ' + type;
+  line.innerHTML = '<span class="t">' + ts() + '</span><span class="msg">' + msg + '</span>';
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text, cls) {
+  const b = document.getElementById('sStatus');
+  b.textContent = text; b.className = 'badge ' + cls;
+}
+
+function moveTracerTo(i) {
+  const node = document.getElementById('node' + i);
+  const orb = node.querySelector('.orb-wrap');
+  const sRect = stageEl.getBoundingClientRect();
+  const oRect = orb.getBoundingClientRect();
+  const x = oRect.left - sRect.left + oRect.width/2;
+  const y = oRect.top - sRect.top + oRect.height/2;
+  tracerEl.style.left = x + 'px';
+  tracerEl.style.top = y + 'px';
+  tracerEl.style.opacity = '1';
+  stageEl.style.setProperty('--gx', x + 'px');
+  node.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+}
+
+function resetTrace() {
+  running = false;
+  timers.forEach(clearTimeout); timers = [];
+  buildPipeline();
+  tracerEl.style.opacity = '0';
+  tracerEl.style.background = '#fff';
+  tracerEl.style.boxShadow = '0 0 12px 4px var(--cyan)';
+  logEl.innerHTML = '<div class="empty">Awaiting trace&hellip; press <b>Trace</b> to begin streaming events.</div>';
+  setStatus('Idle','idle');
+  document.getElementById('sTrade').textContent = '\u2014';
+  document.getElementById('sSteps').textContent = '0 / 10';
+  document.getElementById('sElapsed').textContent = '0 ms';
+  document.getElementById('sFail').textContent = '\u2014';
+  document.getElementById('traceBtn').disabled = false;
+}
+
+function startTrace() {
+  if (running) return;
+  resetTrace();
+  running = true;
+  document.getElementById('traceBtn').disabled = true;
+
+  const tradeId = (document.getElementById('tradeId').value || 'TRD-UNKNOWN').trim();
+  const speed = parseInt(document.getElementById('speed').value, 10);
+  const injectSel = document.getElementById('inject').value;
+  let failAt = -1;
+  if (injectSel === 'random') failAt = Math.floor(Math.random() * STEPS.length);
+  else failAt = parseInt(injectSel, 10);
+
+  const soId = Math.floor(10000 + Math.random()*89999);
+  const payId = 'PAY-' + Math.floor(100000 + Math.random()*899999);
+  const startTime = performance.now();
+
+  document.getElementById('sTrade').textContent = tradeId;
+  setStatus('Tracing\u2026','run');
+  log('Trace started for trade <b>' + tradeId + '</b> \u2192 GET /api/traces/trades/' + tradeId, 'info');
+
+  let i = 0;
+  function step() {
+    if (!running) return;
+    if (i >= STEPS.length) {
+      const el = Math.round(performance.now() - startTime);
+      document.getElementById('sElapsed').textContent = el + ' ms';
+      setStatus('Completed','done');
+      log('\u2714 Trace complete \u2014 trade <b>' + tradeId + '</b> fully settled in ' + el + ' ms', 'ok');
+      running = false;
+      document.getElementById('traceBtn').disabled = false;
+      return;
+    }
+
+    const s = STEPS[i];
+    const node = document.getElementById('node' + i);
+    node.classList.add('processing');
+    moveTracerTo(i);
+    log('\u2192 <b>' + s.svc + '</b> processing step ' + (i+1) + ' \u00b7 ' + s.label + '\u2026', 'info');
+    if (i > 0) document.getElementById('pipe'+(i-1)).classList.add('flowing','done');
+
+    const dur = speed * (0.7 + Math.random()*0.6);
+    const t = setTimeout(function () {
+      if (!running) return;
+      node.classList.remove('processing');
+      const lat = Math.round(dur);
+      document.getElementById('lat'+i).textContent = lat + ' ms';
+      document.getElementById('sElapsed').textContent = Math.round(performance.now()-startTime) + ' ms';
+
+      if (i === failAt) {
+        node.classList.add('error');
+        node.querySelector('.icon').textContent = '\u26A0\uFE0F';
+        if (i > 0) { const p = document.getElementById('pipe'+(i-1)); p.classList.remove('flowing'); p.classList.add('failed'); }
+        const err = ERRORS[i % ERRORS.length];
+        log('\u2716 EXCEPTION in <b>' + s.svc + '</b> @ step ' + (i+1) + ' (' + s.label + '): ' + err, 'err');
+        setStatus('Failed','fail');
+        document.getElementById('sFail').textContent = 'Step ' + (i+1) + ' \u00b7 ' + s.label;
+        document.getElementById('sSteps').textContent = i + ' / 10';
+        tracerEl.style.background = '#f87171';
+        tracerEl.style.boxShadow = '0 0 14px 5px #f87171';
+        running = false;
+        document.getElementById('traceBtn').disabled = false;
+        return;
+      }
+
+      node.classList.add('success');
+      const okMsg = s.ok.replace('{id}', tradeId).replace('{so}', soId).replace('{pay}', payId);
+      log('\u2714 <b>' + s.svc + '</b>: ' + okMsg + ' <span style="color:#475569">(' + lat + ' ms)</span>', 'ok');
+      if (i > 0) { const p = document.getElementById('pipe'+(i-1)); p.classList.remove('flowing'); p.classList.add('done'); }
+      document.getElementById('sSteps').textContent = (i+1) + ' / 10';
+      i++;
+      const t2 = setTimeout(step, 180);
+      timers.push(t2);
+    }, dur);
+    timers.push(t);
+  }
+  step();
+}
+
+window.addEventListener('DOMContentLoaded', function () {
+  pipelineEl = document.getElementById('pipeline');
+  logEl = document.getElementById('log');
+  tracerEl = document.getElementById('tracer');
+  stageEl = document.getElementById('stage');
+  buildPipeline();
+  document.getElementById('tradeId').addEventListener('keydown', function (e) { if (e.key === 'Enter') startTrace(); });
+});
+</script>
+</body>
+</html>

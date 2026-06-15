@@ -22,19 +22,15 @@ public class DefaultBusinessProcessorService implements BusinessProcessorService
     private static final Logger log = LoggerFactory.getLogger(DefaultBusinessProcessorService.class);
 
     private final ExceptionAuditService exceptionAuditService;
-    private final OutputProducerService outputProducerService;
     private final CsfleCryptoService csfleCryptoService;
     private final Timer csfleTimer;
     private final Timer businessLogicTimer;
     private final Timer dbAuditTimer;
-    private final Timer kafkaProduceTimer;
 
     public DefaultBusinessProcessorService(ExceptionAuditService exceptionAuditService,
-                                           OutputProducerService outputProducerService,
                                            CsfleCryptoService csfleCryptoService,
                                            MeterRegistry meterRegistry) {
         this.exceptionAuditService = exceptionAuditService;
-        this.outputProducerService = outputProducerService;
         this.csfleCryptoService = csfleCryptoService;
         this.csfleTimer = Timer.builder("pipeline.stage.duration")
                 .tag("stage", "csfle_decrypt")
@@ -47,10 +43,6 @@ public class DefaultBusinessProcessorService implements BusinessProcessorService
         this.dbAuditTimer = Timer.builder("pipeline.stage.duration")
                 .tag("stage", "db_audit")
                 .description("DB audit / soft failure logging")
-                .register(meterRegistry);
-        this.kafkaProduceTimer = Timer.builder("pipeline.stage.duration")
-                .tag("stage", "kafka_produce")
-                .description("Kafka produce / serialize / encrypt")
                 .register(meterRegistry);
     }
 
@@ -103,15 +95,16 @@ public class DefaultBusinessProcessorService implements BusinessProcessorService
                     );
                 }
 
-                // Stage 6: Kafka produce / serialize
-                kafkaProduceTimer.record(() -> outputProducerService.send(new OutputEvent(
+                // Stage 6: build the downstream record. The processor forwards it through
+                // Kafka Streams' own producer so the input-offset commit and the output
+                // topic write share a single transaction under exactly_once_v2.
+                OutputEvent output = new OutputEvent(
                         normalized.eventId(),
                         normalized.correlationId(),
                         "PROCESSED",
                         Instant.now()
-                )));
-
-                return ProcessingResult.success("OK");
+                );
+                return ProcessingResult.success("OK", output);
             });
 
         } catch (IllegalStateException ex) {
