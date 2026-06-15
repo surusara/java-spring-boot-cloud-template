@@ -16,7 +16,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.Environment;
 import org.springframework.kafka.config.KafkaStreamsConfiguration;
 import org.springframework.kafka.config.StreamsBuilderFactoryBean;
 import org.springframework.kafka.support.serializer.JsonSerde;
@@ -28,6 +27,7 @@ import java.util.Map;
 @EnableConfigurationProperties(BreakerControlProperties.class)
 public class KafkaStreamsConfig {
 
+<<<<<<< HEAD
     /**
      * Fail-fast guard against a legacy compatibility flag that silently disables
      * cooperative rebalancing.
@@ -54,6 +54,8 @@ public class KafkaStreamsConfig {
         }
     }
 
+=======
+>>>>>>> d22254f050bbcf0c09f85d4a47feef009219aca8
     @Bean(name = "paymentsStreamsConfiguration")
     public KafkaStreamsConfiguration paymentsStreamsConfiguration(
             @Value("${spring.kafka.bootstrap-servers:localhost:9092}") String bootstrapServers,
@@ -70,10 +72,14 @@ public class KafkaStreamsConfig {
             // Don't trigger rebalance on graceful close. Combined with session-timeout-ms, KEDA can remove pods safely.
             @Value("${app.stream.internal-leave-group-on-close:false}") boolean internalLeaveGroupOnClose,
             @Value("${app.stream.consumer.auto-offset-reset:latest}") String autoOffsetReset,
+<<<<<<< HEAD
             // Hides aborted transactional writes from upstream producers. Required under EOS so a re-read
             // after a rebalance does not see records from aborted transactions.
             @Value("${app.stream.consumer.isolation-level:read_committed}") String consumerIsolationLevel,
             @Value("${app.stream.consumer.max-poll-records:100}") int maxPollRecords,
+=======
+            @Value("${app.stream.consumer.max-poll-records:250}") int maxPollRecords,
+>>>>>>> d22254f050bbcf0c09f85d4a47feef009219aca8
             // 12 min: must be >= session-timeout-ms. Covers max circuit breaker delay (10m) + 2m buffer.
             @Value("${app.stream.consumer.max-poll-interval-ms:720000}") int maxPollIntervalMs,
             // 12 min: covers max circuit breaker restart delay (10m) + 2m buffer.
@@ -128,10 +134,13 @@ public class KafkaStreamsConfig {
         props.put("consumer.internal.leave.group.on.close", internalLeaveGroupOnClose);
 
         props.put("main.consumer.auto.offset.reset", autoOffsetReset);
+<<<<<<< HEAD
         // isolation.level applies to all internal consumers (main, restore, global).
         // "read_committed" is mandatory under EOS so a rebalanced consumer never re-reads
         // records from an aborted transaction.
         props.put("consumer.isolation.level", consumerIsolationLevel);
+=======
+>>>>>>> d22254f050bbcf0c09f85d4a47feef009219aca8
         props.put("consumer.max.poll.records", maxPollRecords);
         props.put("consumer.max.poll.interval.ms", maxPollIntervalMs);
         props.put("consumer.session.timeout.ms", sessionTimeoutMs);
