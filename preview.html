@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Building Resilient Event-Driven Systems</title>
+
+<style>
+body{
+    font-family: "Segoe UI", Arial, sans-serif;
+    background:#f4f6f9;
+    color:#333;
+    margin:0;
+    line-height:1.7;
+}
+
+.container{
+    width:90%;
+    max-width:1200px;
+    margin:auto;
+    background:white;
+    padding:40px;
+}
+
+h1{
+    color:#0b5394;
+    border-bottom:4px solid #0b5394;
+    padding-bottom:10px;
+}
+
+h2{
+    color:#0b5394;
+    margin-top:50px;
+    border-left:6px solid #0b5394;
+    padding-left:10px;
+}
+
+h3{
+    color:#2b5797;
+}
+
+pre{
+    background:#272822;
+    color:#f8f8f2;
+    padding:15px;
+    border-radius:8px;
+    overflow:auto;
+}
+
+code{
+    font-family:Consolas;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:20px;
+}
+
+table th{
+    background:#0b5394;
+    color:white;
+    padding:12px;
+}
+
+table td{
+    border:1px solid #ddd;
+    padding:10px;
+}
+
+.note{
+    background:#e8f4ff;
+    border-left:5px solid #2196F3;
+    padding:15px;
+    margin:20px 0;
+}
+
+.success{
+    background:#eef8ee;
+    border-left:5px solid #4CAF50;
+    padding:15px;
+}
+
+.diagram{
+    background:#fafafa;
+    border:1px solid #ddd;
+    padding:20px;
+    font-family:Consolas;
+    white-space:pre;
+    overflow:auto;
+}
+
+.toc{
+    background:#f0f8ff;
+    padding:20px;
+    border-radius:8px;
+}
+
+ul li{
+    margin:8px 0;
+}
+
+footer{
+    margin-top:60px;
+    padding:20px;
+    text-align:center;
+    color:gray;
+}
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>Building Resilient Event-Driven Systems</h1>
+
+<p>
+Modern enterprise applications process millions of transactions daily. They must remain reliable,
+highly available, and fault tolerant even when databases, networks, or downstream services fail.
+</p>
+
+<p>
+This article explains four essential architecture patterns:
+</p>
+
+<div class="toc">
+
+<h2>Contents</h2>
+
+<ol>
+<li>Transactional Outbox Pattern</li>
+<li>Apache Kafka</li>
+<li>Circuit Breaker Pattern</li>
+<li>Exception Management</li>
+<li>Putting Everything Together</li>
+<li>Best Practices</li>
+<li>Conclusion</li>
+
+</ol>
+
+</div>
+
+<h2>1. The Challenge in Distributed Systems</h2>
+
+<p>
+
+Imagine a Payment Service that performs the following operations:
+
+</p>
+
+<ol>
+
+<li>Save payment into database</li>
+<li>Publish Kafka event</li>
+<li>Notify downstream services</li>
+<li>Send email</li>
+
+</ol>
+
+<div class="note">
+
+<b>Problem:</b>
+
+What happens if the database transaction succeeds but Kafka publishing fails?
+
+Or Kafka succeeds but the database transaction rolls back?
+
+This creates inconsistent systems.
+
+</div>
+
+<h2>2. Transactional Outbox Pattern</h2>
+
+<p>
+
+The Transactional Outbox Pattern guarantees reliable event publishing without requiring distributed transactions.
+
+</p>
+
+<p>
+
+Instead of publishing directly to Kafka, the application stores the event inside an Outbox table within the same database transaction.
+
+</p>
+
+<div class="diagram">
+
++----------------------+
+| Client Request       |
++----------+-----------+
+           |
+           v
++----------------------+
+| Business Service     |
++----------+-----------+
+           |
+      Database Transaction
+           |
+  +--------+---------+
+  |                  |
+  v                  v
+Business Table   Outbox Table
+  |                  |
+  +--------+---------+
+           |
+      Commit Transaction
+           |
+           v
+   Outbox Publisher
+           |
+           v
+      Apache Kafka
+           |
+   +-------+--------+
+   |       |        |
+   v       v        v
+ Email  Analytics  Other Services
+
+</div>
+
+<h3>Benefits</h3>
+
+<ul>
+
+<li>No distributed transactions</li>
+
+<li>Guaranteed event delivery</li>
+
+<li>Reliable retry mechanism</li>
+
+<li>No data inconsistency</li>
+
+<li>Easy recovery after failures</li>
+
+</ul>
+
+<h3>Example</h3>
+
+<pre><code>
+BEGIN TRANSACTION
+
+Insert Order
+
+Insert Event into Outbox
+
+COMMIT
+</code></pre>
+
+Later...
+
+<pre><code>
+Outbox Publisher
+
+↓
+
+Read Event
+
+↓
+
+Publish to Kafka
+
+↓
+
+Mark Processed
+</code></pre>
+
+<hr>
+
+<h2>3. Apache Kafka</h2>
+
+<p>
+
+Apache Kafka is a distributed event streaming platform used for high throughput and fault tolerant messaging.
+
+</p>
+
+<div class="diagram">
+
+Producer
+
+     |
+
+     v
+
+Kafka Topic
+
+     |
+
++----+-----+
+
+|          |
+
+v          v
+
+Consumer A Consumer B
+
+</div>
+
+<h3>Kafka Components</h3>
+
+<table>
+
+<tr>
+
+<th>Component</th>
+
+<th>Description</th>
+
+</tr>
+
+<tr>
+
+<td>Producer</td>
+
+<td>Publishes events</td>
+
+</tr>
+
+<tr>
+
+<td>Broker</td>
+
+<td>Stores events</td>
+
+</tr>
+
+<tr>
+
+<td>Topic</td>
+
+<td>Logical event channel</td>
+
+</tr>
+
+<tr>
+
+<td>Partition</td>
+
+<td>Parallel processing</td>
+
+</tr>
+
+<tr>
+
+<td>Consumer Group</td>
+
+<td>Load balancing</td>
+
+</tr>
+
+</table>
+
+<h3>Delivery Guarantees</h3>
+
+<table>
+
+<tr>
+
+<th>Mode</th>
+
+<th>Description</th>
+
+</tr>
+
+<tr>
+
+<td>At Most Once</td>
+
+<td>No retries, possible data loss</td>
+
+</tr>
+
+<tr>
+
+<td>At Least Once</td>
+
+<td>Retries allowed, duplicates possible</td>
+
+</tr>
+
+<tr>
+
+<td>Exactly Once</td>
+
+<td>No duplicate processing</td>
+
+</tr>
+
+</table>
+
+<hr>
+
+<h2>4. Circuit Breaker Pattern</h2>
+
+<p>
+
+Circuit Breaker prevents cascading failures when downstream services become slow or unavailable.
+
+</p>
+
+<div class="diagram">
+
+Closed
+
+|
+
+| Too many failures
+
+v
+
+Open
+
+|
+
+| Wait timeout
+
+v
+
+Half Open
+
+|
+
++------------+
+
+|            |
+
+Success    Failure
+
+|            |
+
+v            v
+
+Closed      Open
+
+</div>
+
+<h3>Benefits</h3>
+
+<ul>
+
+<li>Prevents thread exhaustion</li>
+
+<li>Improves resilience</li>
+
+<li>Supports graceful degradation</li>
+
+<li>Automatic recovery</li>
+
+<li>Prevents cascading failures</li>
+
+</ul>
+
+<hr>
+
+<h2>5. Exception Management</h2>
+
+<h3>Business Exceptions</h3>
+
+<ul>
+
+<li>Insufficient Balance</li>
+
+<li>Duplicate Customer</li>
+
+<li>Invalid Account Number</li>
+
+</ul>
+
+<h3>Technical Exceptions</h3>
+
+<ul>
+
+<li>Database Down</li>
+
+<li>Kafka Unavailable</li>
+
+<li>Timeout</li>
+
+<li>Null Pointer Exception</li>
+
+</ul>
+
+<h3>Best Practices</h3>
+
+<ul>
+
+<li>Catch only exceptions you can handle</li>
+
+<li>Never swallow exceptions</li>
+
+<li>Use centralized exception handling</li>
+
+<li>Log with Correlation IDs</li>
+
+<li>Return meaningful error messages</li>
+
+</ul>
+
+<pre><code>
+catch(SQLException ex){
+
+   logger.error("Database failure", ex);
+
+   throw ex;
+
+}
+</code></pre>
+
+<hr>
+
+<h2>Kafka Exception Handling</h2>
+
+<div class="diagram">
+
+Kafka Consumer
+
+      |
+
+Processing
+
+      |
+
++-----+------+
+
+|            |
+
+Success    Failure
+
+|            |
+
+Commit      Retry
+
+             |
+
+             v
+
+       Dead Letter Queue
+
+</div>
+
+<hr>
+
+<h2>6. Putting Everything Together</h2>
+
+<div class="diagram">
+
+                Client
+
+                   |
+
+                   |
+
+          Order Service
+
+                   |
+
+      Save Order + Outbox
+
+                   |
+
+            Commit Database
+
+                   |
+
+          Outbox Publisher
+
+                   |
+
+                Kafka
+
+                   |
+
+   +---------------+---------------+
+
+   |               |               |
+
+Inventory      Notification    Analytics
+
+   |
+
+Circuit Breaker
+
+   |
+
+Retry Policy
+
+   |
+
+Exception Handler
+
+   |
+
+Dead Letter Queue
+
+</div>
+
+<hr>
+
+<h2>Best Practices Summary</h2>
+
+<table>
+
+<tr>
+
+<th>Pattern</th>
+
+<th>Recommendation</th>
+
+</tr>
+
+<tr>
+
+<td>Transactional Outbox</td>
+
+<td>Store events inside database transaction before publishing.</td>
+
+</tr>
+
+<tr>
+
+<td>Kafka</td>
+
+<td>Design consumers to be idempotent.</td>
+
+</tr>
+
+<tr>
+
+<td>Circuit Breaker</td>
+
+<td>Use timeout, failure threshold and fallback strategy.</td>
+
+</tr>
+
+<tr>
+
+<td>Exception Management</td>
+
+<td>Differentiate business and technical exceptions and log properly.</td>
+
+</tr>
+
+</table>
+
+<hr>
+
+<h2>Conclusion</h2>
+
+<div class="success">
+
+Building resilient distributed systems requires combining multiple architectural patterns.
+
+<ul>
+
+<li><b>Transactional Outbox</b> guarantees reliable event publishing.</li>
+
+<li><b>Kafka</b> provides scalable and durable event streaming.</li>
+
+<li><b>Circuit Breaker</b> prevents cascading failures.</li>
+
+<li><b>Exception Management</b> ensures graceful error handling and recovery.</li>
+
+</ul>
+
+Together, these patterns form the foundation of modern event-driven microservices used across banking, fintech, telecommunications, and e-commerce systems.
+
+</div>
+
+<footer>
+
+Building Resilient Event-Driven Systems<br>
+
+Architecture Reference Guide
+
+</footer>
+
+</div>
+
+</body>
+</html>
