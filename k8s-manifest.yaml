@@ -148,8 +148,13 @@ data:
         lag-threshold-critical: 500
 
 ---
+# StatefulSet (not Deployment): gives each pod a STABLE ordinal name (payments-stream-0..N)
+# that survives restarts AND node moves (e.g. Karpenter/cluster-autoscaler consolidation).
+# HOSTNAME → stable → consumer group.instance.id is stable, so Kafka static membership
+# recognizes a returning pod and reclaims its partitions WITHOUT a rebalance. On a plain
+# Deployment the random pod name breaks this and strands partitions for session.timeout.ms.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: payments-stream
   namespace: financial-streams
@@ -157,12 +162,11 @@ metadata:
     app: payments-stream
     component: kafka-streams
 spec:
+  serviceName: payments-stream-headless   # governing headless Service — required for stable identity
+  podManagementPolicy: Parallel           # start/stop pods together (consumer app; identity stays stable)
   replicas: 2                      # KEDA will override this based on Kafka lag
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 2                    # Add 2 new pods before removing old ones
-      maxUnavailable: 0              # Never kill a pod until replacement is ready
+  updateStrategy:
+    type: RollingUpdate            # rolling pod replacement on spec changes
   selector:
     matchLabels:
       app: payments-stream
@@ -346,6 +350,30 @@ spec:
     app: payments-stream
 
 ---
+# Headless Service required by the StatefulSet (spec.serviceName) to give pods stable
+# network identities (payments-stream-0.payments-stream-headless, ...). clusterIP: None.
+# The app is a Kafka consumer — nothing calls it by this name — so this exists purely to
+# satisfy the StatefulSet identity contract. Metrics/probes still go through the ClusterIP
+# Service above and the Prometheus ServiceMonitor (label-based), which are unaffected.
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-stream-headless
+  namespace: financial-streams
+  labels:
+    app: payments-stream
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: management
+      port: 9090
+      targetPort: management
+      protocol: TCP
+  selector:
+    app: payments-stream
+
+---
 # ============================================================
 # KEDA ScaledObject — replaces HPA for Kafka lag-based scaling
 # ============================================================
@@ -370,7 +398,7 @@ metadata:
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
-    kind: Deployment
+    kind: StatefulSet          # KEDA scales the StatefulSet via its /scale subresource
     name: payments-stream
   # Minimum pods — never go below 2 for high availability
   minReplicaCount: 2

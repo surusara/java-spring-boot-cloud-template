@@ -102,6 +102,17 @@ public class BusinessOutcomeCircuitBreaker {
         return circuitBreaker.tryAcquirePermission();
     }
 
+    /**
+     * Returns a permission acquired via {@link #tryAcquirePermission()} without recording a
+     * success or failure. Used when a permit was acquired but the call did not produce a
+     * business outcome (e.g. it aborted with an infrastructure/fatal exception). Prevents a
+     * HALF_OPEN permit from leaking, which would otherwise stall the breaker until
+     * {@code maxWaitDurationInHalfOpenState} elapses.
+     */
+    public void releasePermission() {
+        circuitBreaker.releasePermission();
+    }
+
     public void moveToHalfOpenAndRestart() {
         if (circuitBreaker.getState() == CircuitBreaker.State.OPEN) {
             circuitBreaker.transitionToHalfOpenState();

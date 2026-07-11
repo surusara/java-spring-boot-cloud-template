@@ -110,15 +110,18 @@ public class KafkaProducerConfig {
 
             // Transactional ID prefix: enables Kafka transactions on this producer.
             // Spring Kafka appends a unique suffix (incrementing counter) to create per-instance IDs.
-            // Uses ${random.uuid} for globally unique IDs across all pods/restarts.
-            // Example: payments-producer-550e8400-e29b-41d4-a716-446655440000-0
             //
-            // WHY ${random.uuid} INSTEAD OF ${HOSTNAME}:
-            //   With Deployments (not StatefulSets), pod names change on every restart.
-            //   This means ${HOSTNAME} gives a NEW transactional.id on restart — zombie fencing
-            //   is broken anyway (fencing requires the SAME ID to be reused).
-            //   UUID is honest: guaranteed uniqueness, no false sense of fencing.
-            //   If you switch to StatefulSet, consider ${HOSTNAME} for real zombie fencing.
+            // Default: ${HOSTNAME} with a ${random.uuid} fallback. Under a StatefulSet the pod name
+            // (HOSTNAME) is STABLE across restarts and node moves (payments-stream-2 comes back as
+            // payments-stream-2), so the transactional.id is reused → zombie fencing actually works
+            // (a stale/zombie producer is fenced with ProducerFencedException). The UUID fallback is
+            // only for local dev where HOSTNAME is unset; it yields uniqueness but NO fencing.
+            // Example: payments-producer-payments-stream-2-0
+            //
+            // WHY THIS MATTERS: zombie fencing requires the SAME id to be reused across restarts.
+            // On a plain Deployment (random pod names) fencing never engages, so if this producer is
+            // ever used to write the output topic, a zombie pod can commit a duplicate after a new
+            // pod takes over. Prefer StatefulSet + stable HOSTNAME.
             //
             // WHY TRANSACTIONS:
             //   Without: a crash between send() and Streams commit → duplicate output on replay.
@@ -127,7 +130,7 @@ public class KafkaProducerConfig {
             // ORPHAN CLEANUP:
             //   Orphaned transactional IDs (from crashed pods) are cleaned by the broker after
             //   transactional.id.expiration.ms (default 7 days). No manual intervention needed.
-            @Value("${spring.kafka.producer.transactional-id-prefix:payments-producer-${random.uuid}-}") String transactionalIdPrefix) {
+            @Value("${spring.kafka.producer.transactional-id-prefix:payments-producer-${HOSTNAME:${random.uuid}}-}") String transactionalIdPrefix) {
 
         Map<String, Object> config = new HashMap<>();
 
