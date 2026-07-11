@@ -1,6 +1,7 @@
 package com.example.financialstream.kafka;
 
 import com.example.financialstream.circuit.BusinessOutcomeCircuitBreaker;
+import com.example.financialstream.circuit.CircuitBreakerOpenException;
 import com.example.financialstream.model.InputEvent;
 import com.example.financialstream.model.OutputEvent;
 import com.example.financialstream.model.ProcessingResult;
@@ -69,36 +70,51 @@ public class PaymentsRecordProcessorSupplier
                 Timer.Sample e2eSample = Timer.start();
                 try {
                     if (!breaker.tryAcquirePermission()) {
-                        throw new IllegalStateException(
+                        // Breaker OPEN (or HALF_OPEN out of permits): throw a RetriableException so
+                        // StreamFatalExceptionHandler replaces the thread instead of shutting the
+                        // client down. The pod stays alive and the stream pauses in place; the
+                        // aborted transaction means this record is reprocessed after recovery.
+                        throw new CircuitBreakerOpenException(
                             "Circuit breaker does not permit processing in current state"
                         );
                     }
 
-                    String topic = ctx.recordMetadata().map(RecordMetadata::topic).orElse(null);
-                    int partition = ctx.recordMetadata().map(RecordMetadata::partition).orElse(-1);
-                    long offset = ctx.recordMetadata().map(RecordMetadata::offset).orElse(-1L);
+                    // Permit acquired. Guarantee it is settled exactly once: breaker.record(...) on a
+                    // business outcome, otherwise releasePermission() so a HALF_OPEN permit never leaks.
+                    boolean settled = false;
+                    try {
+                        String topic = ctx.recordMetadata().map(RecordMetadata::topic).orElse(null);
+                        int partition = ctx.recordMetadata().map(RecordMetadata::partition).orElse(-1);
+                        long offset = ctx.recordMetadata().map(RecordMetadata::offset).orElse(-1L);
 
-                    ProcessingResult result = businessProcessorService.process(
-                        "payments-stream",
-                        topic,
-                        partition,
-                        offset,
-                        record.key(),
-                        record.value()
-                    );
+                        ProcessingResult result = businessProcessorService.process(
+                            "payments-stream",
+                            topic,
+                            partition,
+                            offset,
+                            record.key(),
+                            record.value()
+                        );
 
-                    breaker.record(result);
+                        breaker.record(result);
+                        settled = true;
 
-                    // Forward the downstream record through Streams' producer. Under EOS v2
-                    // the forward + the input-offset commit are part of the same transaction.
-                    if (result.output() != null) {
-                        ctx.forward(record.withValue(result.output()));
+                        // Forward the downstream record through Streams' producer. Under EOS v2
+                        // the forward + the input-offset commit are part of the same transaction.
+                        if (result.output() != null) {
+                            ctx.forward(record.withValue(result.output()));
+                        }
+                    } finally {
+                        if (!settled) {
+                            breaker.releasePermission();
+                        }
                     }
 
-                } catch (IllegalStateException cbException) {
-                    // Circuit breaker or explicit hard-stop — let it propagate.
-                    log.error("\uD83D\uDD34 Processing blocked: {}", cbException.getMessage());
-                    throw cbException;
+                } catch (CircuitBreakerOpenException cbOpen) {
+                    // Expected pause signal — do not treat as fatal.
+                    log.warn("\u23F8\uFE0F Circuit breaker OPEN \u2014 pausing (stream thread will be replaced): {}",
+                            cbOpen.getMessage());
+                    throw cbOpen;
                 } catch (RetriableException retriable) {
                     // Network/timeout/broker-disconnect: let the original Kafka exception bubble
                     // up so StreamFatalExceptionHandler classifies it as REPLACE_THREAD
@@ -107,6 +123,10 @@ public class PaymentsRecordProcessorSupplier
                     log.warn("\u26A0\uFE0F Retriable exception for key={}: {} \u2014 deferring to handler for thread replace",
                             record.key(), retriable.getMessage());
                     throw retriable;
+                } catch (IllegalStateException fatal) {
+                    // Genuine fatal/business hard-stop — propagate so the handler triggers SHUTDOWN_CLIENT.
+                    log.error("\uD83D\uDD34 Fatal processing error for key={}: {}", record.key(), fatal.getMessage());
+                    throw fatal;
                 } catch (Exception ex) {
                     log.error("\u274C Unexpected error processing key={}", record.key(), ex);
                     throw new IllegalStateException("Unexpected processor error; stream must restart", ex);
