@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "PaymentAudit",
+  "namespace": "com.example.consumer.avro",
+  "doc": "Audit trail event emitted to the secondary output topic for every processed payment.",
+  "fields": [
+    { "name": "eventId", "type": "string", "doc": "Unique event id; downstream dedupe key." },
+    { "name": "paymentId", "type": "string" },
+    { "name": "outcome", "type": "string" },
+    { "name": "detail", "type": ["null", "string"], "default": null },
+    { "name": "recordedAt", "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

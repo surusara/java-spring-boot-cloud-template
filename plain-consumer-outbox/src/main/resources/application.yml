@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: plain-consumer-outbox
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payments}
+    username: ${DB_USERNAME:payments}
+    password: ${DB_PASSWORD:payments}
+    hikari:
+      # Size the pool for concurrency + the relay thread. Rule of thumb: listener threads + a few.
+      maximum-pool-size: ${DB_POOL_SIZE:8}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate          # schema is owned by Flyway, never by Hibernate
+    open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+  kafka:
+    # Confluent Cloud bootstrap servers, e.g. pkc-xxxxx.region.gcp.confluent.cloud:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+app:
+  kafka:
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:SASL_SSL}
+      sasl-mechanism: ${KAFKA_SASL_MECHANISM:PLAIN}
+      # Confluent Cloud cluster API key/secret.
+      sasl-jaas-config: ${KAFKA_SASL_JAAS_CONFIG:}
+    schema-registry:
+      url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+      # Schema Registry API key:secret, e.g. SR_KEY:SR_SECRET
+      basic-auth-user-info: ${SCHEMA_REGISTRY_AUTH:}
+
+  consumer:
+    topic: ${INPUT_TOPIC:payments.input}
+    group-id: ${CONSUMER_GROUP_ID:payments-consumer-v1}
+    concurrency: ${CONSUMER_CONCURRENCY:4}
+    max-poll-records: ${MAX_POLL_RECORDS:10}
+    max-poll-interval-ms: ${MAX_POLL_INTERVAL_MS:300000}
+    session-timeout-ms: ${SESSION_TIMEOUT_MS:45000}
+    heartbeat-interval-ms: ${HEARTBEAT_INTERVAL_MS:10000}
+
+  outbox:
+    approved-topic: ${APPROVED_TOPIC:payments.approved}
+    audit-topic: ${AUDIT_TOPIC:payments.audit}
+    batch-size: ${OUTBOX_BATCH_SIZE:200}
+    poll-delay-ms: ${OUTBOX_POLL_DELAY_MS:500}
+
+  enrichment:
+    base-url: ${ENRICHMENT_BASE_URL:http://static-data-service/api}
+
+  circuit-breaker:
+    failure-rate-threshold: ${CB_FAILURE_RATE:50}
+    sliding-window-seconds: ${CB_WINDOW_SECONDS:30}
+    minimum-number-of-calls: ${CB_MIN_CALLS:10}
+    wait-duration-open-seconds: ${CB_WAIT_OPEN_SECONDS:60}
+    permitted-calls-half-open: ${CB_HALF_OPEN_CALLS:3}
+    reconcile-delay-ms: ${CB_RECONCILE_DELAY_MS:5000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,circuitbreakers
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    com.example.consumer: INFO
