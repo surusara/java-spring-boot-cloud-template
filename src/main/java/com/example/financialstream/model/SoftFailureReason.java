@@ -42,6 +42,13 @@ public enum SoftFailureReason {
         "BUSINESS_RULE",
         null,
         "Customer must increase balance or reduce transaction amount"
+    ),
+    INTERNAL_ERROR(
+        "INTERNAL_ERROR",
+        "Unexpected error while processing the record",
+        "INTERNAL",
+        null,
+        "Inspect the audit record and application logs; likely a bug or unhandled downstream failure"
     );
 
     private final String code;

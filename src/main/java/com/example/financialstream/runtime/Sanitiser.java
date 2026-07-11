@@ -1,5 +1,8 @@
 package com.example.financialstream.runtime;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -11,6 +14,8 @@ import java.util.Set;
  * Uses a deny-list approach: any key containing a sensitive pattern gets its value redacted.
  */
 public final class Sanitiser {
+
+    private static final Logger log = LoggerFactory.getLogger(Sanitiser.class);
 
     private static final Set<String> SENSITIVE_PATTERNS = Set.of(
             "password", "secret", "credential",
@@ -71,6 +76,8 @@ public final class Sanitiser {
         try {
             return url.replaceAll("//[^/@]+@", "//");
         } catch (Exception e) {
+            // Fail closed: never expose a URL we could not fully sanitise.
+            log.warn("Failed to sanitise JDBC URL; redacting entire value: {}", e.getMessage());
             return REDACTED;
         }
     }

@@ -111,11 +111,30 @@ public class DefaultBusinessProcessorService implements BusinessProcessorService
             // Hard/fatal failures must propagate — caught by StreamFatalExceptionHandler → SHUTDOWN_CLIENT → pod restart
             throw ex;
         } catch (Exception ex) {
-            log.error("Unexpected error in processor", ex);
+            log.error("Unexpected error in processor for stream={}, topic={}, partition={}, offset={}, key={}",
+                streamName, topic, partition, offset, key, ex);
+            // Persist a durable audit record so the failure is not lost to logs alone. The name
+            // "successWithExceptionLogged" implies a recorded exception, so back it with the audit store.
+            recordInternalErrorAudit(streamName, topic, partition, offset, key, event);
             return ProcessingResult.successWithExceptionLogged(
-                "INTERNAL_ERROR",
+                SoftFailureReason.INTERNAL_ERROR.code(),
                 "Unexpected error: " + ex.getMessage()
             );
+        }
+    }
+
+    private void recordInternalErrorAudit(String streamName, String topic, int partition, long offset,
+                                          String key, InputEvent event) {
+        try {
+            String correlationId = event != null ? event.correlationId() : null;
+            String payloadHash = event != null ? sha256(event.payload()) : "NO_PAYLOAD";
+            exceptionAuditService.logSoftFailure(SoftFailureRecord.of(
+                streamName, topic, partition, offset, key, correlationId,
+                SoftFailureReason.INTERNAL_ERROR, payloadHash
+            ));
+        } catch (Exception auditEx) {
+            // Never let an audit failure mask the original error path.
+            log.error("Failed to persist internal-error audit record for key={}", key, auditEx);
         }
     }
 
