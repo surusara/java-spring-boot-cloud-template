@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "PaymentInput",
+  "namespace": "com.example.consumer.avro",
+  "doc": "Inbound payment instruction consumed from the input topic.",
+  "fields": [
+    { "name": "paymentId", "type": "string", "doc": "Business key; used for idempotency/dedupe." },
+    { "name": "accountId", "type": "string" },
+    { "name": "amount", "type": { "type": "bytes", "logicalType": "decimal", "precision": 18, "scale": 2 } },
+    { "name": "currency", "type": "string" },
+    { "name": "createdAt", "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

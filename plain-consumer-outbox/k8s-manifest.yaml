@@ -1,0 +1,198 @@
+# =============================================================================
+# plain-consumer-outbox — Kubernetes manifest
+#
+# A plain Kafka consumer does NOT need a StatefulSet: pause()/resume() keeps each
+# consumer in the group across a dependency outage (no identity juggling), and on
+# restart cooperative rebalancing reassigns partitions. So a Deployment + KEDA is
+# the right shape here.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+---
+# Non-secret configuration. Secrets (Confluent API keys, DB password) live in the Secret below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plain-consumer-outbox-config
+  namespace: payments
+data:
+  KAFKA_BOOTSTRAP_SERVERS: "pkc-xxxxx.<region>.<cloud>.confluent.cloud:9092"
+  KAFKA_SECURITY_PROTOCOL: "SASL_SSL"
+  KAFKA_SASL_MECHANISM: "PLAIN"
+  SCHEMA_REGISTRY_URL: "https://psrc-xxxxx.<region>.<cloud>.confluent.cloud"
+  INPUT_TOPIC: "payments.input"
+  APPROVED_TOPIC: "payments.approved"
+  AUDIT_TOPIC: "payments.audit"
+  CONSUMER_GROUP_ID: "payments-consumer-v1"
+  # Threads per pod — keep concurrency <= (partitions / pods) for full utilisation.
+  CONSUMER_CONCURRENCY: "4"
+  MAX_POLL_RECORDS: "10"
+  MAX_POLL_INTERVAL_MS: "300000"
+  SESSION_TIMEOUT_MS: "45000"
+  HEARTBEAT_INTERVAL_MS: "10000"
+  OUTBOX_BATCH_SIZE: "200"
+  OUTBOX_POLL_DELAY_MS: "500"
+  ENRICHMENT_BASE_URL: "http://static-data-service.payments.svc.cluster.local/api"
+  CB_FAILURE_RATE: "50"
+  CB_WINDOW_SECONDS: "30"
+  CB_MIN_CALLS: "10"
+  CB_WAIT_OPEN_SECONDS: "60"
+  CB_HALF_OPEN_CALLS: "3"
+  DB_URL: "jdbc:postgresql://payments-postgres.payments.svc.cluster.local:5432/payments"
+  DB_POOL_SIZE: "8"
+---
+# Placeholder secret — populate from your secret manager (e.g. External Secrets / CSI), do NOT commit real values.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain-consumer-outbox-secrets
+  namespace: payments
+type: Opaque
+stringData:
+  # Confluent Cloud cluster API key/secret embedded in the JAAS config.
+  KAFKA_SASL_JAAS_CONFIG: >-
+    org.apache.kafka.common.security.plain.PlainLoginModule required
+    username="<CLUSTER_API_KEY>" password="<CLUSTER_API_SECRET>";
+  # Schema Registry API key:secret.
+  SCHEMA_REGISTRY_AUTH: "<SR_API_KEY>:<SR_API_SECRET>"
+  DB_USERNAME: "payments"
+  DB_PASSWORD: "<DB_PASSWORD>"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plain-consumer-outbox
+  namespace: payments
+  labels:
+    app: plain-consumer-outbox
+spec:
+  replicas: 2                      # baseline; KEDA scales this between min/max
+  selector:
+    matchLabels:
+      app: plain-consumer-outbox
+  template:
+    metadata:
+      labels:
+        app: plain-consumer-outbox
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      terminationGracePeriodSeconds: 60   # allow in-flight record + outbox cycle to finish and commit
+      containers:
+        - name: app
+          image: <registry>/plain-consumer-outbox:1.0.0
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: plain-consumer-outbox-config
+            - secretRef:
+                name: plain-consumer-outbox-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plain-consumer-outbox
+  namespace: payments
+  labels:
+    app: plain-consumer-outbox
+spec:
+  selector:
+    app: plain-consumer-outbox
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: plain-consumer-outbox-pdb
+  namespace: payments
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: plain-consumer-outbox
+---
+# KEDA scales the Deployment on consumer-group lag. Never scale beyond the partition
+# count (48 here) — extra pods would sit idle.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: plain-consumer-outbox-scaler
+  namespace: payments
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: plain-consumer-outbox
+  minReplicaCount: 2
+  maxReplicaCount: 12
+  cooldownPeriod: 120           # avoid scale-thrash → fewer rebalances
+  pollingInterval: 15
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 120
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: "pkc-xxxxx.<region>.<cloud>.confluent.cloud:9092"
+        consumerGroup: "payments-consumer-v1"
+        topic: "payments.input"
+        lagThreshold: "500"       # ~target lag per pod before adding a replica
+        offsetResetPolicy: "earliest"
+        sasl: "plaintext"         # KEDA value for SASL/PLAIN
+        tls: "enable"
+      authenticationRef:
+        name: plain-consumer-outbox-kafka-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: plain-consumer-outbox-kafka-auth
+  namespace: payments
+spec:
+  secretTargetRef:
+    - parameter: username
+      name: plain-consumer-outbox-kafka-sasl
+      key: username
+    - parameter: password
+      name: plain-consumer-outbox-kafka-sasl
+      key: password
+---
+# Plain username/password for KEDA's Kafka scaler (separate from the app JAAS config).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain-consumer-outbox-kafka-sasl
+  namespace: payments
+type: Opaque
+stringData:
+  username: "<CLUSTER_API_KEY>"
+  password: "<CLUSTER_API_SECRET>"

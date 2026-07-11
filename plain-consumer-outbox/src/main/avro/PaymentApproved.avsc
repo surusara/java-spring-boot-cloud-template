@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "PaymentApproved",
+  "namespace": "com.example.consumer.avro",
+  "doc": "Business outcome emitted to the primary output topic after enrichment/approval.",
+  "fields": [
+    { "name": "eventId", "type": "string", "doc": "Unique event id; downstream dedupe key." },
+    { "name": "paymentId", "type": "string" },
+    { "name": "accountId", "type": "string" },
+    { "name": "amount", "type": { "type": "bytes", "logicalType": "decimal", "precision": 18, "scale": 2 } },
+    { "name": "currency", "type": "string" },
+    { "name": "riskTier", "type": "string", "doc": "Enrichment result from the external static-data service." },
+    { "name": "approvedAt", "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}
