@@ -47,9 +47,11 @@ public class ActuatorSecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         // Kubelet probes + Prometheus health scrape must remain unauthenticated.
                         .requestMatchers(EndpointRequest.to(HealthEndpoint.class)).permitAll()
-                        // Everything else (metrics, prometheus, runtime, monitoring, ...) needs a token.
-                        // Tighten to a scope if desired, e.g. .hasAuthority("SCOPE_actuator.read").
-                        .anyRequest().authenticated())
+                        // Everything else (metrics, prometheus, runtime, monitoring, ...) requires a
+                        // token carrying the actuator scope. SAMPLE scope name — replace "actuator.read"
+                        // with the scope your IdP issues. If your IdP nests roles in a custom claim
+                        // instead of the standard "scope" claim, add a JwtAuthenticationConverter.
+                        .anyRequest().hasAuthority("SCOPE_actuator.read"))
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {}))
                 .csrf(AbstractHttpConfigurer::disable);
         return http.build();
