@@ -4,6 +4,20 @@ spring:
   config:
     activate:
       on-profile: prod
+  # OIDC bearer-token validation for the Actuator management port (9090).
+  # Set OIDC_ISSUER_URI to your IdP's issuer (e.g. https://login.example.com/realms/payments);
+  # Spring fetches the discovery doc + JWKS from it to validate tokens.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI}
+
+# Actuator: render health detail only for authenticated callers (see ActuatorSecurityConfig)
+management:
+  endpoint:
+    health:
+      show-details: when-authorized
 
 # Disable Swagger in production
 springdoc:
