@@ -42,6 +42,25 @@ class DefaultBusinessProcessorServiceTest {
     }
 
     @Test
+    void shouldAuditUnexpectedErrorAsInternalErrorSoftFailure() {
+        ExceptionAuditService auditService = mock(ExceptionAuditService.class);
+        CsfleCryptoService cryptoService = input -> {
+            throw new RuntimeException("boom");
+        };
+
+        DefaultBusinessProcessorService service = new DefaultBusinessProcessorService(auditService, cryptoService, new SimpleMeterRegistry());
+        var result = service.process("payments-stream", "input", 0, 1L, "k1",
+                new InputEvent("e1", "c1", "cid-1", "PAYMENT", "{}", false, false));
+
+        // Unexpected (non-IllegalState) errors are converted to a logged soft-failure, but must be
+        // persisted to the audit store so the failure is not silently swallowed.
+        assertEquals(ProcessingStatus.SUCCESS_WITH_EXCEPTION_LOGGED, result.status());
+        assertEquals("INTERNAL_ERROR", result.code());
+        assertNull(result.output(), "Unexpected error must NOT produce a downstream OutputEvent");
+        verify(auditService, times(1)).logSoftFailure(any());
+    }
+
+    @Test
     void shouldThrowFatalForHardFailure() {
         ExceptionAuditService auditService = mock(ExceptionAuditService.class);
         CsfleCryptoService cryptoService = input -> input;

@@ -37,7 +37,7 @@ public class KafkaStreamsShutdownHook {
             Thread.currentThread().interrupt();
             log.warn("⚠ Shutdown interrupted");
         } catch (Exception ex) {
-            log.warn("⚠ Error during graceful shutdown: {}", ex.getMessage());
+            log.warn("⚠ Error during graceful shutdown", ex);
         }
     }
 }

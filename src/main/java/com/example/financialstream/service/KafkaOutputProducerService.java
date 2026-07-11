@@ -7,7 +7,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Transactional Kafka producer service.
@@ -50,7 +52,11 @@ public class KafkaOutputProducerService implements OutputProducerService {
             kafkaTemplate.executeInTransaction(ops -> {
                 try {
                     return ops.send(outputTopic, event.eventId(), event).get(30, TimeUnit.SECONDS);
-                } catch (Exception ex) {
+                } catch (InterruptedException ex) {
+                    // Restore the interrupt flag so the caller/thread pool can observe the interruption.
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted while awaiting broker ack for send", ex);
+                } catch (ExecutionException | TimeoutException ex) {
                     throw new RuntimeException("Send within transaction failed", ex);
                 }
             });
