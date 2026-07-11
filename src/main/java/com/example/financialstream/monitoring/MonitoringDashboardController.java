@@ -2,6 +2,7 @@ package com.example.financialstream.monitoring;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,9 +30,17 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@code GET /monitoring/streams}     — Kafka Streams health only</li>
  *   <li>{@code GET /monitoring/sse}         — Server-Sent Events stream</li>
  * </ul>
+ *
+ * <p><b>Security:</b> restricted to the {@code dev} and {@code test} profiles only.
+ * These endpoints are unauthenticated and expose internal Kubernetes topology
+ * (pod names/IPs, node names, replica counts) and consumer-group lag, so they must
+ * not be reachable on the public business port (8080) in preprod/prod. In those
+ * environments the same data is available via {@code GET /actuator/monitoring} on the
+ * cluster-internal management port (9090). This mirrors {@code RuntimeDiscoveryController}.
  */
 @RestController
 @RequestMapping("/monitoring")
+@Profile({"dev", "test"})
 public class MonitoringDashboardController {
 
     private static final Logger log = LoggerFactory.getLogger(MonitoringDashboardController.class);
