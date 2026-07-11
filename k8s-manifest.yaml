@@ -240,6 +240,11 @@ spec:
             # Requires RBAC: deploy k8s-rbac-monitoring.yaml before enabling.
             - name: K8S_ENABLED
               value: "true"
+            # --- Actuator OIDC auth (management port 9090) ---
+            # Issuer used to validate bearer tokens on non-probe actuator endpoints.
+            # SAMPLE value — replace with your real IdP issuer URL.
+            - name: OIDC_ISSUER_URI
+              value: "https://idp.example.com/realms/payments"
           resources:
             requests:
               cpu: 1000m
